@@ -97,9 +97,9 @@ flowchart TB
   end
 
   subgraph worktrees["worktrees（mew で起動）"]
-    wt_a["worktree A\nweb :3101"]
-    wt_b["worktree B\nweb :3102"]
-    wt_n["worktree N\nweb :3xxx"]
+    wt_a["worktree A<br/>web :3101"]
+    wt_b["worktree B<br/>web :3102"]
+    wt_n["worktree N<br/>web :3xxx"]
   end
 
   subgraph postgres_dbs["同一 Postgres 内の DB"]
@@ -114,7 +114,7 @@ flowchart TB
   wt_b -->|host.docker.internal| db_b
   wt_n -->|host.docker.internal| db_n
 
-  mew["mew\n(stdout に YAML)"]
+  mew["mew<br/>(stdout に YAML)"]
   mew -->|"docker compose -f -"| wt_a
   mew -->|"docker compose -f -"| wt_b
   mew -->|"docker compose -f -"| wt_n
