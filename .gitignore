@@ -1,0 +1,31 @@
+# 環境・設定（機密を含む可能性）
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Thumbnails
+Thumbs.db
+ehthumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 一時ファイル・ログ
+*.log
+*.tmp
+*.temp
+.cache/
+
+# マージコンフリクト
+*.rej
+*.orig

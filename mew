@@ -1,0 +1,593 @@
+#!/usr/bin/env bash
+# mew - Multiple Environment Worktrees
+# Git worktree + Docker Compose で並行開発するための汎用 CLI（単一ファイル）
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# --- 前提チェック ---
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "mew: 必要なコマンドが見つかりません: $1" >&2
+    echo "mew: git と Docker をインストールしてから再実行してください。" >&2
+    exit 1
+  fi
+}
+
+# --- プロジェクト・main worktree の検出 ---
+find_project_root() {
+  local dir="${1:-.}"
+  dir="$(cd "$dir" && pwd)"
+  if [[ -d "$dir/.git" ]]; then
+    echo "$dir"
+    return 0
+  fi
+  if git -C "$dir" rev-parse --show-toplevel 2>/dev/null; then
+    return 0
+  fi
+  echo "$dir"
+}
+
+find_main_worktree_dir() {
+  local line path
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      path="${line#worktree }"
+      if [[ -d "$path/.git" ]]; then
+        echo "$path"
+        return 0
+      fi
+    fi
+  done < <(git worktree list --porcelain 2>/dev/null || true)
+  return 1
+}
+
+# --- 推測: docker-compose.yml と .env から ---
+infer_main_dir() {
+  local root="$1"
+  local main
+  main="$(find_main_worktree_dir 2>/dev/null || true)"
+  if [[ -n "${main:-}" ]]; then
+    echo "$main"
+    return
+  fi
+  if [[ -d "$root/.git" ]]; then
+    echo "$root"
+    return
+  fi
+  echo "$root"
+}
+
+infer_db_name_prefix() {
+  local main_dir="$1"
+  local compose="$main_dir/docker-compose.yml"
+  local prefix
+  if [[ -f "$compose" ]]; then
+    prefix="$(grep -E 'POSTGRES_DB:|POSTGRES_DB\s*:' "$compose" 2>/dev/null | head -1 | sed -E 's/.*\$\{POSTGRES_DB:-([^}]+)\}.*/\1/; s/.*POSTGRES_DB:\s*([^[:space:]]+).*/\1/; s/[" ]//g')" || true
+    if [[ -n "${prefix:-}" ]]; then
+      echo "$prefix"
+      return
+    fi
+  fi
+  echo "$(basename "$main_dir" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+|_+$//g')"
+}
+
+infer_env_file() {
+  local main_dir="$1"
+  if [[ -n "${MEW_ENV_FILE:-}" ]]; then
+    echo "$MEW_ENV_FILE"
+    return
+  fi
+  if [[ -f "$main_dir/app/.env" ]]; then
+    echo "$main_dir/app/.env"
+    return
+  fi
+  if [[ -f "$main_dir/.env" ]]; then
+    echo "$main_dir/.env"
+    return
+  fi
+  echo "$main_dir/.env"
+}
+
+infer_worktree_volume_mount() {
+  local main_dir="$1"
+  local compose="$main_dir/docker-compose.yml"
+  if [[ -n "${MEW_WORKTREE_VOLUME:-}" ]]; then
+    echo "${MEW_WORKTREE_VOLUME}"
+    return
+  fi
+  if [[ -f "$compose" ]]; then
+    local line
+    line="$(awk '/^\s+web:\s*$/,/^  [a-z]/ { if (/^\s+-\s+\.\//) { print; exit } }' "$compose" | head -1)"
+    if [[ -n "$line" ]]; then
+      # "./app:/app" -> "${WORKTREE_DIR}/app:/app"
+      local host_path container_path
+      host_path="$(echo "$line" | sed -E 's/^\s+-\s+\.\/([^:]+):.*/\1/')"
+      container_path="$(echo "$line" | sed -E 's/^\s+-\s+[^:]+:(.*)/\1/' | tr -d ' ')"
+      if [[ -n "$host_path" && -n "$container_path" ]]; then
+        echo "\${WORKTREE_DIR:-.}/$host_path:$container_path"
+        return
+      fi
+    fi
+  fi
+  echo '${WORKTREE_DIR:-.}:/app'
+}
+
+# --- スラグ・DB名・ポート ---
+sanitize_slug() {
+  local s="${1:-}"
+  s="$(echo "$s" | tr '[:upper:]' '[:lower:]')"
+  s="$(echo "$s" | sed -E 's/[^a-z0-9]+/_/g; s/^_+|_+$//g; s/__+/_/g')"
+  if [[ -z "$s" ]]; then
+    s="wt"
+  fi
+  if [[ "$s" =~ ^[0-9] ]]; then
+    s="wt_${s}"
+  fi
+  echo "$s"
+}
+
+db_name_for_slug() {
+  local slug="$1"
+  local prefix="${2:-}"
+  local name="${prefix}_${slug}"
+  if ((${#name} > 60)); then
+    local hash
+    hash="$(echo -n "$name" | cksum | awk '{print $1}')"
+    name="${name:0:45}_${hash}"
+    name="${name:0:60}"
+  fi
+  echo "$name"
+}
+
+web_port_for_slug() {
+  local slug="$1"
+  local hash
+  hash="$(echo -n "$slug" | cksum | awk '{print $1}')"
+  echo "$((3100 + (hash % 900)))"
+}
+
+# --- 現在の worktree 向けの値を算出（env / compose / build で共通利用）---
+mew_resolve_context() {
+  local root="${1:-.}"
+  root="$(cd "$root" && pwd)"
+  MEW_PROJECT_ROOT="$root"
+  MEW_MAIN_DIR="$(infer_main_dir "$root")"
+  MEW_MAIN_DIR="$(cd "$MEW_MAIN_DIR" && pwd)"
+  MEW_DB_NAME_PREFIX="$(infer_db_name_prefix "$MEW_MAIN_DIR")"
+  MEW_ENV_FILE="$(infer_env_file "$MEW_MAIN_DIR")"
+  MEW_WORKTREE_VOLUME_MOUNT="$(infer_worktree_volume_mount "$MEW_MAIN_DIR")"
+  MEW_DB_SERVICE="${MEW_DB_SERVICE:-db}"
+  MEW_WEB_SERVICE="${MEW_WEB_SERVICE:-web}"
+
+  local target_dir="${2:-$root}"
+  target_dir="$(cd "$target_dir" && pwd)"
+  MEW_TARGET_WORKTREE_DIR="$target_dir"
+  MEW_TARGET_BASENAME="$(basename "$target_dir")"
+  MEW_WORKTREE_SLUG="$(sanitize_slug "$MEW_TARGET_BASENAME")"
+  MEW_IS_MAIN=false
+  if [[ "$target_dir" == "$MEW_MAIN_DIR" ]]; then
+    MEW_IS_MAIN=true
+    MEW_WORKTREE_DB_NAME="${MEW_WORKTREE_DB_NAME:-$MEW_DB_NAME_PREFIX}"
+    MEW_WT_PROJECT="$(sanitize_slug "$(basename "$MEW_MAIN_DIR")")"
+  else
+    MEW_WORKTREE_DB_NAME="${MEW_WORKTREE_DB_NAME:-$(db_name_for_slug "$MEW_WORKTREE_SLUG" "$MEW_DB_NAME_PREFIX")}"
+    MEW_WT_PROJECT="${MEW_WT_PROJECT:-$MEW_WORKTREE_SLUG}"
+  fi
+  MEW_WEB_PORT="${MEW_WEB_PORT:-$(web_port_for_slug "$MEW_WORKTREE_SLUG")}"
+}
+
+# --- worktree 用 compose YAML を stdout に出力（ファイルは作らない）---
+mew_emit_compose_yml() {
+  local main_dir="$1"
+  local worktree_volume="${2:-}"
+  [[ -z "$worktree_volume" ]] && worktree_volume='${WORKTREE_DIR:-.}:/app'
+  local web_svc="${MEW_WEB_SERVICE:-web}"
+  cat <<YAML
+services:
+  ${web_svc}:
+    build:
+      context: .
+      target: \${MEW_BUILD_TARGET:-base}
+    ports:
+      - "\${WEB_PORT:-3000}:3000"
+    env_file:
+      - \${ENV_FILE:-.env}
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: \${DATABASE_URL}
+      NEXTAUTH_URL: \${NEXTAUTH_URL:-http://localhost:\${WEB_PORT}}
+      WORKTREE_DIR: \${WORKTREE_DIR}
+      CHOKIDAR_USEPOLLING: "1"
+      WATCHPACK_POLLING: "true"
+      WATCHPACK_POLLING_INTERVAL: "1000"
+    volumes:
+      - ${worktree_volume}
+      - web-node_modules:/app/node_modules
+      - web-pnpm-store:/pnpm-store
+    command: >
+      sh -c "pnpm install --frozen-lockfile &&
+             if [ \"\${DEV_TURBO:-0}\" = \"1\" ]; then
+               pnpm dev --turbo;
+             else
+               pnpm dev;
+             fi"
+
+volumes:
+  web-node_modules:
+  web-pnpm-store:
+
+YAML
+}
+
+# --- サブコマンド: ヘルプ ---
+cmd_help() {
+  cat <<'EOF'
+mew - Multiple Environment Worktrees
+
+Git worktree と Docker Compose で並行開発するための汎用 CLI。
+
+使い方:
+  mew [サブコマンド] [オプション...]
+
+サブコマンド:
+  build     対話型: worktree 作成 → 各 worktree で web 起動
+  up [path] 指定 worktree（省略時はカレント）の web を起動（DB 作成・migrate は MEW_MIGRATE_CMD があれば実行）
+  env       現在の worktree の DB 名・DATABASE_URL 等を出力（source 用）
+  path      このターミナルで mew をすぐ使うための export PATH を出力（install 直後に eval 用）
+  compose   この worktree 用の Compose で docker compose を実行
+  rm        worktree の web 停止・DB 削除
+  rm --all  main で全 worktree を削除
+  restart   main と全 worktree の web を再起動
+
+詳細: https://github.com/nekojarashi/mew
+EOF
+}
+
+# --- サブコマンド: path（install 直後に eval して現在のシェルで mew を有効にする）---
+cmd_path() {
+  local self="${BASH_SOURCE[0]:-$0}"
+  if [[ "$self" != /* ]]; then
+    self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
+  fi
+  local dir
+  dir="$(cd "$(dirname "$self")" && pwd)"
+  echo "export PATH=\"$dir:\$PATH\""
+}
+
+# --- サブコマンド: env ---
+cmd_env() {
+  local root
+  root="$(find_project_root "${1:-.}")"
+  mew_resolve_context "$root" "$root"
+  local db_user="${POSTGRES_USER:-app_user}"
+  local db_pass="${POSTGRES_PASSWORD:-app_pass}"
+  local db_port="${DB_PORT:-5433}"
+  echo "MEW_MAIN_DIR=$MEW_MAIN_DIR"
+  echo "MEW_WORKTREE_DB_NAME=$MEW_WORKTREE_DB_NAME"
+  echo "WORKTREE_DB_NAME=$MEW_WORKTREE_DB_NAME"
+  echo "DATABASE_URL=postgresql://${db_user}:${db_pass}@db:5432/${MEW_WORKTREE_DB_NAME}"
+  echo "DATABASE_URL_HOST=postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
+  echo "MEW_WT_PROJECT=$MEW_WT_PROJECT"
+  echo "MEW_WEB_PORT=$MEW_WEB_PORT"
+  echo "COMPOSE_PROJECT_NAME=$(basename "$MEW_MAIN_DIR")"
+}
+
+# --- サブコマンド: compose ---
+cmd_compose() {
+  local root
+  root="$(find_project_root .)"
+  mew_resolve_context "$root" "$root"
+  if [[ ! -f "$MEW_ENV_FILE" ]]; then
+    echo "mew: ENV_FILE が見つかりません: $MEW_ENV_FILE" >&2
+    exit 1
+  fi
+  local db_user="${POSTGRES_USER:-app_user}"
+  local db_pass="${POSTGRES_PASSWORD:-app_pass}"
+  local db_port="${DB_PORT:-5433}"
+  local database_url="postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
+  local nextauth_url="${NEXTAUTH_URL:-http://localhost:${MEW_WEB_PORT}}"
+  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    cd "$MEW_MAIN_DIR" && \
+    export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" \
+           WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" \
+           ENV_FILE="$MEW_ENV_FILE" \
+           WEB_PORT="$MEW_WEB_PORT" \
+           DATABASE_URL="$database_url" \
+           NEXTAUTH_URL="$nextauth_url" \
+           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+    docker compose -f - "$@"
+  )
+}
+
+# --- サブコマンド: up（既存 worktree 1 つの web 起動）---
+cmd_up() {
+  local root
+  root="$(find_project_root .)"
+  mew_resolve_context "$root" "${1:-$root}"
+  if [[ ! -f "$MEW_ENV_FILE" ]]; then
+    echo "mew: ENV_FILE が見つかりません: $MEW_ENV_FILE" >&2
+    exit 1
+  fi
+  mew_build_one "$MEW_TARGET_WORKTREE_DIR"
+}
+
+# --- サブコマンド: build（worktree 作成 + web 起動）---
+cmd_build() {
+  local root
+  root="$(find_project_root .)"
+  need_cmd git
+  need_cmd docker
+  if [[ ! -d "$root/.git" ]]; then
+    echo "mew: git リポジトリのルートで実行してください。" >&2
+    exit 1
+  fi
+  mew_resolve_context "$root" "$root"
+  if [[ "$MEW_IS_MAIN" != "true" ]]; then
+    echo "mew build: main worktree で実行してください。" >&2
+    exit 1
+  fi
+  if [[ ! -f "$MEW_ENV_FILE" ]]; then
+    echo "mew: ENV_FILE が見つかりません: $MEW_ENV_FILE" >&2
+    exit 1
+  fi
+  local main_compose="$MEW_MAIN_DIR/docker-compose.yml"
+  if [[ ! -f "$main_compose" ]]; then
+    echo "mew: 見つかりません: $main_compose" >&2
+    exit 1
+  fi
+
+  # 対話: ブランチ名
+  local branches=()
+  if (($# > 0)); then
+    branches=("$@")
+  else
+    if [[ "${MEW_NON_INTERACTIVE:-}" == "1" ]]; then
+      echo "mew build: 非対話時はブランチ名を引数で指定してください。" >&2
+      exit 1
+    fi
+    local line
+    read -r -p "作成/起動したいブランチ名をスペース区切りで入力: " line
+    # shellcheck disable=SC2206
+    branches=($line)
+  fi
+  if ((${#branches[@]} == 0)); then
+    echo "mew: ブランチ名が空です。" >&2
+    exit 1
+  fi
+
+  local prefix="${MEW_PREFIX:-../$(basename "$MEW_MAIN_DIR")-}"
+  local base_ref
+  base_ref="$(git -C "$MEW_MAIN_DIR" rev-parse --abbrev-ref HEAD)"
+
+  for br in "${branches[@]}"; do
+    local slug wt_dir wt_dir_abs
+    slug="$(sanitize_slug "$br")"
+    wt_dir="${prefix}${slug}"
+    wt_dir_abs="$(cd "$MEW_MAIN_DIR" && cd "$wt_dir" && pwd)"
+    if git worktree list --porcelain 2>/dev/null | grep -Fq "worktree $wt_dir_abs"; then
+      echo "[mew] already exists: $wt_dir_abs"
+    else
+      if [[ -e "$wt_dir_abs" ]]; then
+        echo "mew: ディレクトリが既に存在します: $wt_dir_abs" >&2
+        exit 1
+      fi
+      if git show-ref --verify --quiet "refs/heads/$br" 2>/dev/null; then
+        git worktree add "$wt_dir_abs" "$br"
+      else
+        git worktree add -b "$br" "$wt_dir_abs" "$base_ref"
+      fi
+    fi
+    # この worktree で web 起動
+    (MEW_INVOKED_FROM_BUILD=1 mew_build_one "$wt_dir_abs")
+  done
+  echo "[mew] done"
+}
+
+mew_build_one() {
+  local target_dir="$1"
+  target_dir="$(cd "$target_dir" && pwd)"
+  mew_resolve_context "$MEW_MAIN_DIR" "$target_dir"
+  # main の .env を読み込み（POSTGRES_* 等を利用するため）
+  if [[ -f "$MEW_ENV_FILE" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$MEW_ENV_FILE" 2>/dev/null || true
+    set +a
+  fi
+  local db_user="${POSTGRES_USER:-app_user}"
+  local db_pass="${POSTGRES_PASSWORD:-app_pass}"
+  local db_port="${DB_PORT:-5433}"
+  local database_url="postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
+  local nextauth_url="http://localhost:${MEW_WEB_PORT}"
+  local clone_source="${DB_CLONE_SOURCE:-$MEW_DB_NAME_PREFIX}"
+  local env_file="$MEW_ENV_FILE"
+
+  echo "[mew] MAIN_DIR=$MEW_MAIN_DIR TARGET=$target_dir WT_PROJECT=$MEW_WT_PROJECT WEB_PORT=$MEW_WEB_PORT DB=$MEW_WORKTREE_DB_NAME"
+  (cd "$MEW_MAIN_DIR" && docker compose up -d "$MEW_DB_SERVICE")
+  local db_container_id
+  db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
+  if [[ -z "${db_container_id:-}" ]]; then
+    echo "mew: DB コンテナの起動に失敗しました。" >&2
+    exit 1
+  fi
+  # DB 作成（無ければ）
+  docker exec -i "$db_container_id" sh -lc "
+    set -e
+    DB_NAME='$MEW_WORKTREE_DB_NAME'
+    CLONE_FROM='$clone_source'
+    EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$DB_NAME'\")
+    if [ \"\$EXISTS\" != '1' ]; then
+      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"CREATE DATABASE \\\"\$DB_NAME\\\";\"
+      SRC_EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$CLONE_FROM'\")
+      if [ \"\$SRC_EXISTS\" = '1' ]; then
+        pg_dump -U \"\$POSTGRES_USER\" -d \"\$CLONE_FROM\" -Fc | pg_restore -U \"\$POSTGRES_USER\" -d \"\$DB_NAME\" --no-owner --no-privileges || true
+      fi
+    fi
+  "
+  # マイグレーション（MEW_MIGRATE_CMD があれば実行）
+  if [[ -n "${MEW_MIGRATE_CMD:-}" ]]; then
+    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+      cd "$MEW_MAIN_DIR" && \
+      export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
+             WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
+             MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+      docker compose -f - run --rm -e CI=1 "$MEW_WEB_SERVICE" sh -lc "$MEW_MIGRATE_CMD"
+    ) || true
+  fi
+  # web 起動
+  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    cd "$MEW_MAIN_DIR" && \
+    export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
+           WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
+           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+    docker compose -f - up -d "$MEW_WEB_SERVICE"
+  )
+  echo "[mew] OK: http://localhost:$MEW_WEB_PORT"
+}
+
+# --- サブコマンド: rm ---
+cmd_rm() {
+  local root
+  root="$(find_project_root .)"
+  mew_resolve_context "$root" "$root"
+  if [[ "$MEW_IS_MAIN" == "true" ]]; then
+    echo "mew rm: main worktree では実行できません。引数で worktree パスを指定するか、全削除の場合は mew rm --all を main で実行してください。" >&2
+    exit 1
+  fi
+  if [[ "${1:-}" == "--all" ]]; then
+    shift
+    cmd_rm_all "$root"
+    return
+  fi
+  # この worktree のみ
+  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    cd "$MEW_MAIN_DIR" && \
+    export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+    docker compose -f - down -v
+  ) || true
+  if [[ -z "${KEEP_DB:-}" ]]; then
+    local db_container_id
+    db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
+    if [[ -n "${db_container_id:-}" ]]; then
+      docker exec -i "$db_container_id" sh -lc "
+        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$MEW_WORKTREE_DB_NAME';\"
+        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE IF EXISTS \\\"$MEW_WORKTREE_DB_NAME\\\";\"
+      " || true
+    fi
+  fi
+  echo "[mew] rm done (worktree の削除は手動で: git worktree remove <path>)"
+}
+
+cmd_rm_all() {
+  local root="$1"
+  mew_resolve_context "$root" "$root"
+  if [[ "$MEW_IS_MAIN" != "true" ]]; then
+    echo "mew rm --all: main worktree で実行してください。" >&2
+    exit 1
+  fi
+  local worktrees=()
+  while IFS= read -r p; do
+    [[ -n "$p" && "$p" != "$MEW_MAIN_DIR" ]] && worktrees+=("$p")
+  done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  if ((${#worktrees[@]} == 0)); then
+    echo "[mew] worktree が他にありません。"
+    return 0
+  fi
+  if [[ "${MEW_NON_INTERACTIVE:-}" != "1" ]]; then
+    echo "以下を削除します: ${worktrees[*]}"
+    read -r -p "続行しますか？ [y/N] " ans
+    [[ "${ans:-N}" != [yY] ]] && exit 0
+  fi
+  for wt_dir in "${worktrees[@]}"; do
+    [[ ! -d "$wt_dir" ]] && continue
+    local slug wt_project
+    slug="$(sanitize_slug "$(basename "$wt_dir")")"
+    wt_project="$slug"
+    local wt_db
+    wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
+    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+      cd "$MEW_MAIN_DIR" && \
+      export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+      docker compose -f - down -v
+    ) || true
+    local db_container_id
+    db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
+    if [[ -n "${db_container_id:-}" && -z "${KEEP_DB:-}" ]]; then
+      docker exec -i "$db_container_id" sh -lc "
+        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$wt_db';\"
+        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE IF EXISTS \\\"$wt_db\\\";\"
+      " || true
+    fi
+    git worktree remove --force "$wt_dir" 2>/dev/null || true
+  done
+  echo "[mew] rm --all done"
+}
+
+# --- サブコマンド: restart ---
+cmd_restart() {
+  local root
+  root="$(find_project_root .)"
+  mew_resolve_context "$root" "$root"
+  if [[ "$MEW_IS_MAIN" != "true" ]]; then
+    echo "mew restart: main worktree で実行してください。" >&2
+    exit 1
+  fi
+  local only="${ONLY:-}"
+  if [[ -z "$only" || "$only" == "main" ]]; then
+    echo "[mew] restart main"
+    (cd "$MEW_MAIN_DIR" && docker compose up -d)
+  fi
+  if [[ "$only" == "main" ]]; then
+    return 0
+  fi
+  local worktrees=()
+  while IFS= read -r p; do
+    [[ -n "$p" && "$p" != "$MEW_MAIN_DIR" ]] && worktrees+=("$p")
+  done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  for wt_dir in "${worktrees[@]}"; do
+    [[ ! -d "$wt_dir" ]] && continue
+    local slug wt_project web_port nextauth_url wt_db database_url
+    slug="$(sanitize_slug "$(basename "$wt_dir")")"
+    wt_project="$slug"
+    web_port="$(web_port_for_slug "$slug")"
+    nextauth_url="http://localhost:${web_port}"
+    wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
+    database_url="postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_pass}@host.docker.internal:${DB_PORT:-5433}/${wt_db}"
+    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+      cd "$MEW_MAIN_DIR" && \
+      export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" \
+             WEB_PORT="$web_port" NEXTAUTH_URL="$nextauth_url" DATABASE_URL="$database_url" \
+             MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+      docker compose -f - up -d "$MEW_WEB_SERVICE"
+    )
+  done
+  echo "[mew] restart done"
+}
+
+# --- エントリ ---
+main() {
+  need_cmd git
+  need_cmd docker
+
+  local sub="${1:-}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    build)   cmd_build "$@";;
+    up)      cmd_up "$@";;
+    env)     cmd_env "$@";;
+    path)    cmd_path "$@";;
+    compose) cmd_compose "$@";;
+    rm)      cmd_rm "$@";;
+    restart) cmd_restart "$@";;
+    -h|--help|help|"") cmd_help;;
+    -v|--version) echo "mew $VERSION";;
+    *)
+      echo "mew: 未知のサブコマンド: $sub" >&2
+      cmd_help >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
