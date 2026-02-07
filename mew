@@ -224,6 +224,68 @@ web_port_for_slug() {
   echo "$((3100 + (hash % 900)))"
 }
 
+is_port_available() {
+  local port="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("0.0.0.0", port))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+sys.exit(0)
+PY
+    return $?
+  fi
+  if command -v python >/dev/null 2>&1; then
+    python - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("0.0.0.0", port))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+sys.exit(0)
+PY
+    return $?
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 1
+    fi
+    return 0
+  fi
+  return 0
+}
+
+pick_available_port() {
+  local port="$1"
+  local max_tries=50
+  local i=0
+  while ((i < max_tries)); do
+    if is_port_available "$port"; then
+      echo "$port"
+      return
+    fi
+    port="$((port + 1))"
+    i="$((i + 1))"
+  done
+  echo "$port"
+}
+
 # --- 安全な .env パーサー（source の代替。変数定義行のみを export する）---
 safe_load_env() {
   local env_file="$1"
@@ -284,7 +346,12 @@ mew_resolve_context() {
       MEW_WT_PROJECT="$MEW_WORKTREE_SLUG"
     fi
   fi
-  MEW_WEB_PORT="${MEW_WEB_PORT:-$(web_port_for_slug "$MEW_WORKTREE_SLUG")}"
+  if [[ -n "${MEW_WEB_PORT:-}" ]]; then
+    MEW_WEB_PORT="$MEW_WEB_PORT"
+  else
+    MEW_WEB_PORT="$(web_port_for_slug "$MEW_WORKTREE_SLUG")"
+    MEW_WEB_PORT="$(pick_available_port "$MEW_WEB_PORT")"
+  fi
   validate_db_name "$MEW_WORKTREE_DB_NAME"
 }
 
@@ -478,17 +545,27 @@ cmd_build() {
     slug="$(sanitize_slug "$br")"
     wt_dir="${prefix}${slug}"
     wt_dir_abs="$(abs_path "$MEW_MAIN_DIR" "$wt_dir")"
-    if git worktree list --porcelain 2>/dev/null | grep -Fq "worktree $wt_dir_abs"; then
-      echo "[mew] already exists: $wt_dir_abs"
+    local existing_wt_for_branch
+    existing_wt_for_branch="$(git worktree list --porcelain 2>/dev/null | awk -v br="refs/heads/$br" '
+      $1 == "worktree" { path = $2 }
+      $1 == "branch" && $2 == br { print path; exit }
+    ')"
+    if [[ -n "$existing_wt_for_branch" ]]; then
+      echo "[mew] already exists for branch: $br ($existing_wt_for_branch)"
+      wt_dir_abs="$existing_wt_for_branch"
     else
-      if [[ -e "$wt_dir_abs" ]]; then
-        echo "mew: ディレクトリが既に存在します: $wt_dir_abs" >&2
-        exit 1
-      fi
-      if git show-ref --verify --quiet "refs/heads/$br" 2>/dev/null; then
-        git worktree add "$wt_dir_abs" "$br"
+      if git worktree list --porcelain 2>/dev/null | grep -Fq "worktree $wt_dir_abs"; then
+        echo "[mew] already exists: $wt_dir_abs"
       else
-        git worktree add -b "$br" "$wt_dir_abs" "$base_ref"
+        if [[ -e "$wt_dir_abs" ]]; then
+          echo "mew: ディレクトリが既に存在します（worktree 未登録のためスキップ）: $wt_dir_abs" >&2
+          continue
+        fi
+        if git show-ref --verify --quiet "refs/heads/$br" 2>/dev/null; then
+          git worktree add "$wt_dir_abs" "$br"
+        else
+          git worktree add -b "$br" "$wt_dir_abs" "$base_ref"
+        fi
       fi
     fi
     # この worktree で web 起動
@@ -519,8 +596,15 @@ mew_build_one() {
   local clone_source="${DB_CLONE_SOURCE:-$MEW_DB_NAME_PREFIX}"
   validate_db_name "$clone_source"
   local env_file="$MEW_ENV_FILE"
+  local refresh_db="${MEW_DB_REFRESH:-}"
+  if [[ -z "$refresh_db" && "${MEW_INVOKED_FROM_BUILD:-}" == "1" ]]; then
+    refresh_db="1"
+  fi
 
   echo "[mew] MAIN_DIR=$MEW_MAIN_DIR TARGET=$target_dir WT_PROJECT=$MEW_WT_PROJECT WEB_PORT=$MEW_WEB_PORT DB=$MEW_WORKTREE_DB_NAME"
+  if [[ "$refresh_db" == "1" ]]; then
+    echo "[mew] refresh db: $MEW_WORKTREE_DB_NAME from $clone_source"
+  fi
   (cd "$MEW_MAIN_DIR" && docker compose up -d "$MEW_DB_SERVICE")
   local db_container_id
   db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
@@ -533,7 +617,13 @@ mew_build_one() {
     set -e
     DB_NAME='$MEW_WORKTREE_DB_NAME'
     CLONE_FROM='$clone_source'
+    REFRESH_DB='$refresh_db'
     EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$DB_NAME'\")
+    if [ \"\$EXISTS\" = '1' ] && [ \"\$REFRESH_DB\" = '1' ]; then
+      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='\$DB_NAME' AND pid <> pg_backend_pid();\"
+      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE \\\"\$DB_NAME\\\";\"
+      EXISTS='0'
+    fi
     if [ \"\$EXISTS\" != '1' ]; then
       psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"CREATE DATABASE \\\"\$DB_NAME\\\";\"
       SRC_EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$CLONE_FROM'\")
