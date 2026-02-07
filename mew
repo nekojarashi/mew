@@ -127,6 +127,14 @@ sanitize_slug() {
   echo "$s"
 }
 
+validate_db_name() {
+  local name="$1"
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    echo "mew: 不正なDB名です（英字・数字・アンダースコアのみ使用可能）: $name" >&2
+    exit 1
+  fi
+}
+
 db_name_for_slug() {
   local slug="$1"
   local prefix="${2:-}"
@@ -145,6 +153,35 @@ web_port_for_slug() {
   local hash
   hash="$(echo -n "$slug" | cksum | awk '{print $1}')"
   echo "$((3100 + (hash % 900)))"
+}
+
+# --- 安全な .env パーサー（source の代替。変数定義行のみを export する）---
+safe_load_env() {
+  local env_file="$1"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # 先頭の空白を除去
+    line="${line#"${line%%[![:space:]]*}"}"
+    # コメント行・空行をスキップ
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    # 'export ' プレフィックスを除去
+    line="${line#export }"
+    line="${line#"${line%%[![:space:]]*}"}"
+    # KEY=VALUE 形式のみ受け付ける
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*) ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      # 末尾の空白を除去
+      value="${value%"${value##*[![:space:]]}"}"
+      # 囲みクォートを除去
+      if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+        value="${BASH_REMATCH[1]}"
+      elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+      fi
+      export "$key=$value"
+    fi
+  done < "$env_file"
 }
 
 # --- 現在の worktree 向けの値を算出（env / compose / build で共通利用）---
@@ -175,6 +212,7 @@ mew_resolve_context() {
     MEW_WT_PROJECT="${MEW_WT_PROJECT:-$MEW_WORKTREE_SLUG}"
   fi
   MEW_WEB_PORT="${MEW_WEB_PORT:-$(web_port_for_slug "$MEW_WORKTREE_SLUG")}"
+  validate_db_name "$MEW_WORKTREE_DB_NAME"
 }
 
 # --- worktree 用 compose YAML を stdout に出力（ファイルは作らない）---
@@ -348,8 +386,10 @@ cmd_build() {
     fi
     local line
     read -r -p "作成/起動したいブランチ名をスペース区切りで入力: " line
+    set -f
     # shellcheck disable=SC2206
     branches=($line)
+    set +f
   fi
   if ((${#branches[@]} == 0)); then
     echo "mew: ブランチ名が空です。" >&2
@@ -390,17 +430,17 @@ mew_build_one() {
   mew_resolve_context "$MEW_MAIN_DIR" "$target_dir"
   # main の .env を読み込み（POSTGRES_* 等を利用するため）
   if [[ -f "$MEW_ENV_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$MEW_ENV_FILE" 2>/dev/null || true
-    set +a
+    safe_load_env "$MEW_ENV_FILE"
   fi
+  # .env が MEW_WORKTREE_DB_NAME を上書きしている可能性があるため再検証
+  validate_db_name "$MEW_WORKTREE_DB_NAME"
   local db_user="${POSTGRES_USER:-app_user}"
   local db_pass="${POSTGRES_PASSWORD:-app_pass}"
   local db_port="${DB_PORT:-5433}"
   local database_url="postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
   local nextauth_url="http://localhost:${MEW_WEB_PORT}"
   local clone_source="${DB_CLONE_SOURCE:-$MEW_DB_NAME_PREFIX}"
+  validate_db_name "$clone_source"
   local env_file="$MEW_ENV_FILE"
 
   echo "[mew] MAIN_DIR=$MEW_MAIN_DIR TARGET=$target_dir WT_PROJECT=$MEW_WT_PROJECT WEB_PORT=$MEW_WEB_PORT DB=$MEW_WORKTREE_DB_NAME"
@@ -426,6 +466,8 @@ mew_build_one() {
     fi
   "
   # マイグレーション（MEW_MIGRATE_CMD があれば実行）
+  # 注意: MEW_MIGRATE_CMD はそのまま sh -c に渡される（設計上の仕様）。
+  # 信頼できない環境変数を受け入れないこと。
   if [[ -n "${MEW_MIGRATE_CMD:-}" ]]; then
     mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
       cd "$MEW_MAIN_DIR" && \
@@ -506,6 +548,7 @@ cmd_rm_all() {
     wt_project="$slug"
     local wt_db
     wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
+    validate_db_name "$wt_db"
     mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
       cd "$MEW_MAIN_DIR" && \
       export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \

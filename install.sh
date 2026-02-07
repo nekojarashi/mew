@@ -11,6 +11,7 @@ set -euo pipefail
 
 MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/koshiba-softwares/mew/main/mew}"
 MEW_INSTALL_DIR="${MEW_INSTALL_DIR:-}"
+MEW_CHECKSUM="${MEW_CHECKSUM:-}"
 
 # 前提チェック（警告のみ、インストールは続行）
 for cmd in git docker; do
@@ -54,12 +55,32 @@ if [[ -n "$SCRIPT_DIR" && -f "$LOCAL_MEW" ]]; then
 else
   echo "mew をインストールします: $TARGET"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL "$MEW_RAW_URL" -o "$TARGET"
+    curl -fsSL --proto '=https' --tlsv1.2 --max-redirs 3 "$MEW_RAW_URL" -o "$TARGET"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$TARGET" "$MEW_RAW_URL"
+    wget -q --https-only --max-redirect=3 -O "$TARGET" "$MEW_RAW_URL"
   else
     echo "mew install: curl または wget が必要です。" >&2
     exit 1
+  fi
+  # チェックサム検証（MEW_CHECKSUM が指定されている場合）
+  if [[ -n "$MEW_CHECKSUM" ]]; then
+    ACTUAL_CHECKSUM=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      ACTUAL_CHECKSUM="$(sha256sum "$TARGET" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      ACTUAL_CHECKSUM="$(shasum -a 256 "$TARGET" | awk '{print $1}')"
+    fi
+    if [[ -z "$ACTUAL_CHECKSUM" ]]; then
+      echo "mew install: 警告: sha256sum/shasum が利用できないため、チェックサム検証をスキップしました。" >&2
+    elif [[ "$ACTUAL_CHECKSUM" != "$MEW_CHECKSUM" ]]; then
+      rm -f "$TARGET"
+      echo "mew install: チェックサム不一致。ダウンロードを中断しました。" >&2
+      echo "  期待値: $MEW_CHECKSUM" >&2
+      echo "  実際値: $ACTUAL_CHECKSUM" >&2
+      exit 1
+    else
+      echo "チェックサム検証: OK"
+    fi
   fi
   # 404 や HTML が保存されていないか確認（先頭が shebang であること）
   if ! head -n 1 "$TARGET" | grep -q '^#!'; then

@@ -24,16 +24,16 @@
 
 ## 機能一覧
 
-| サブコマンド | 説明 |
-|--------------|------|
-| `mew`（引数なし） | ヘルプ（サブコマンド一覧）を表示 |
-| `mew build [branch...]` | 対話型で worktree を作成し、各 worktree で web を起動する（並行開発のメイン入口） |
-| `mew up [path]` | 指定した worktree（省略時はカレント）の web を起動する（DB 作成・`MEW_MIGRATE_CMD` があれば実行） |
-| `mew env` | 現在の worktree の DB 名・`DATABASE_URL` 等を出力する（`source` 用） |
+| サブコマンド            | 説明                                                                                                       |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `mew`（引数なし）       | ヘルプ（サブコマンド一覧）を表示                                                                           |
+| `mew build [branch...]` | 対話型で worktree を作成し、各 worktree で web を起動する（並行開発のメイン入口）                          |
+| `mew up [path]`         | 指定した worktree（省略時はカレント）の web を起動する（DB 作成・`MEW_MIGRATE_CMD` があれば実行）          |
+| `mew env`               | 現在の worktree の DB 名・`DATABASE_URL` 等を出力する（`source` 用）                                       |
 | `mew compose [args...]` | この worktree 用の Compose プロジェクトで `docker compose` を実行する（`run` / `logs` / `exec` / `up` 等） |
-| `mew rm` | この worktree の web 停止・DB 削除 |
-| `mew rm --all` | 全 worktree の web 停止・DB 削除・worktree 削除（main で実行） |
-| `mew restart` | main と全 worktree の web を再起動する |
+| `mew rm`                | この worktree の web 停止・DB 削除                                                                         |
+| `mew rm --all`          | 全 worktree の web 停止・DB 削除・worktree 削除（main で実行）                                             |
+| `mew restart`           | main と全 worktree の web を再起動する                                                                     |
 
 ---
 
@@ -179,11 +179,11 @@ mew rm --all
 
 ## リポジトリ構成
 
-| ファイル | 説明 |
-|----------|------|
-| `mew` | 単一の Bash スクリプト（全ロジックをこのファイルに含む） |
-| `install.sh` | curl \| bash 用インストーラ（PATH に `mew` を配置） |
-| `README.md` | 本ドキュメント |
+| ファイル     | 説明                                                     |
+| ------------ | -------------------------------------------------------- |
+| `mew`        | 単一の Bash スクリプト（全ロジックをこのファイルに含む） |
+| `install.sh` | curl \| bash 用インストーラ（PATH に `mew` を配置）      |
+| `README.md`  | 本ドキュメント                                           |
 
 ---
 
