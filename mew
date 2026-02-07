@@ -233,7 +233,11 @@ mew_resolve_context() {
     MEW_WT_PROJECT="$(sanitize_slug "$(basename "$MEW_MAIN_DIR")")"
   else
     MEW_WORKTREE_DB_NAME="${MEW_WORKTREE_DB_NAME:-$(db_name_for_slug "$MEW_WORKTREE_SLUG" "$MEW_DB_NAME_PREFIX")}"
-    MEW_WT_PROJECT="${MEW_WT_PROJECT:-$MEW_WORKTREE_SLUG}"
+    if [[ -n "${MEW_WT_PROJECT_OVERRIDE:-}" ]]; then
+      MEW_WT_PROJECT="$MEW_WT_PROJECT_OVERRIDE"
+    else
+      MEW_WT_PROJECT="$MEW_WORKTREE_SLUG"
+    fi
   fi
   MEW_WEB_PORT="${MEW_WEB_PORT:-$(web_port_for_slug "$MEW_WORKTREE_SLUG")}"
   validate_db_name "$MEW_WORKTREE_DB_NAME"
