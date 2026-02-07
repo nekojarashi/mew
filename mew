@@ -336,10 +336,18 @@ mew_resolve_context() {
   MEW_IS_MAIN=false
   if [[ "$target_dir" == "$MEW_MAIN_DIR" ]]; then
     MEW_IS_MAIN=true
-    MEW_WORKTREE_DB_NAME="${MEW_WORKTREE_DB_NAME:-$MEW_DB_NAME_PREFIX}"
+    if [[ -n "${MEW_WORKTREE_DB_NAME_OVERRIDE:-}" ]]; then
+      MEW_WORKTREE_DB_NAME="$MEW_WORKTREE_DB_NAME_OVERRIDE"
+    else
+      MEW_WORKTREE_DB_NAME="$MEW_DB_NAME_PREFIX"
+    fi
     MEW_WT_PROJECT="$(sanitize_slug "$(basename "$MEW_MAIN_DIR")")"
   else
-    MEW_WORKTREE_DB_NAME="${MEW_WORKTREE_DB_NAME:-$(db_name_for_slug "$MEW_WORKTREE_SLUG" "$MEW_DB_NAME_PREFIX")}"
+    if [[ -n "${MEW_WORKTREE_DB_NAME_OVERRIDE:-}" ]]; then
+      MEW_WORKTREE_DB_NAME="$MEW_WORKTREE_DB_NAME_OVERRIDE"
+    else
+      MEW_WORKTREE_DB_NAME="$(db_name_for_slug "$MEW_WORKTREE_SLUG" "$MEW_DB_NAME_PREFIX")"
+    fi
     if [[ -n "${MEW_WT_PROJECT_OVERRIDE:-}" ]]; then
       MEW_WT_PROJECT="$MEW_WT_PROJECT_OVERRIDE"
     else
@@ -582,12 +590,16 @@ mew_build_one() {
   fi
   mew_resolve_context "$MEW_MAIN_DIR" "$target_dir"
   local resolved_wt_project="$MEW_WT_PROJECT"
+  local resolved_wt_db_name="$MEW_WORKTREE_DB_NAME"
   # main の .env を読み込み（POSTGRES_* 等を利用するため）
   if [[ -f "$MEW_ENV_FILE" ]]; then
     safe_load_env "$MEW_ENV_FILE"
   fi
   if [[ -z "${MEW_WT_PROJECT_OVERRIDE:-}" ]]; then
     MEW_WT_PROJECT="$resolved_wt_project"
+  fi
+  if [[ -z "${MEW_WORKTREE_DB_NAME_OVERRIDE:-}" ]]; then
+    MEW_WORKTREE_DB_NAME="$resolved_wt_db_name"
   fi
   # .env が MEW_WORKTREE_DB_NAME を上書きしている可能性があるため再検証
   validate_db_name "$MEW_WORKTREE_DB_NAME"
@@ -602,6 +614,12 @@ mew_build_one() {
   local refresh_db="${MEW_DB_REFRESH:-}"
   if [[ -z "$refresh_db" && "${MEW_INVOKED_FROM_BUILD:-}" == "1" ]]; then
     refresh_db="1"
+  fi
+  if [[ "$MEW_WORKTREE_DB_NAME" == "$clone_source" ]]; then
+    if [[ "$refresh_db" == "1" ]]; then
+      echo "mew: refresh db はコピー元と同名のため無効化します: $MEW_WORKTREE_DB_NAME" >&2
+    fi
+    refresh_db="0"
   fi
 
   echo "[mew] MAIN_DIR=$MEW_MAIN_DIR TARGET=$target_dir WT_PROJECT=$MEW_WT_PROJECT WEB_PORT=$MEW_WEB_PORT DB=$MEW_WORKTREE_DB_NAME"
