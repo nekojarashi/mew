@@ -146,8 +146,9 @@ PY
     if [[ -n "$line" ]]; then
       # "./app:/app" -> "${WORKTREE_DIR}/app:/app"
       local host_path container_path
-      host_path="$(echo "$line" | sed -E 's/^\s+-\s+\.\/([^:]+):.*/\1/')"
-      container_path="$(echo "$line" | sed -E 's/^\s+-\s+[^:]+:(.*)/\1/' | tr -d ' ')"
+      host_path="${line%%:*}"
+      container_path="${line#*:}"
+      host_path="${host_path#./}"
       if [[ -n "$host_path" && -n "$container_path" ]]; then
         echo "\${WORKTREE_DIR:-.}/$host_path:$container_path"
         return
