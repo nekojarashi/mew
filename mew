@@ -112,7 +112,10 @@ for raw in open(path, encoding="utf-8"):
     if in_web and re.match(r'^\s{2}[A-Za-z].*:', raw):
         break
     if in_web and re.match(r'^\s+-\s+\./', raw):
-        print(raw.strip())
+        line = raw.strip()
+        if line.startswith("- "):
+            line = line[2:]
+        print(line)
         break
 PY
 )"
@@ -130,7 +133,10 @@ for raw in open(path):
     if in_web and re.match(r'^\s{2}[A-Za-z].*:', raw):
         break
     if in_web and re.match(r'^\s+-\s+\./', raw):
-        print(raw.strip())
+        line = raw.strip()
+        if line.startswith("- "):
+            line = line[2:]
+        print(line)
         break
 PY
 )"
