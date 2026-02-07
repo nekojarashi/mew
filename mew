@@ -98,7 +98,45 @@ infer_worktree_volume_mount() {
   fi
   if [[ -f "$compose" ]]; then
     local line
-    line="$(awk '/^[[:space:]]+web:[[:space:]]*$/,/^  [a-z]/ { if ($0 ~ /^[[:space:]]+-[[:space:]]+\\./) { print; exit } }' "$compose" | head -1)"
+    if command -v python3 >/dev/null 2>&1; then
+      line="$(python3 - "$compose" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+in_web = False
+for raw in open(path, encoding="utf-8"):
+    if re.match(r'^\s+web:\s*$', raw):
+        in_web = True
+        continue
+    if in_web and re.match(r'^\s{2}[A-Za-z].*:', raw):
+        break
+    if in_web and re.match(r'^\s+-\s+\./', raw):
+        print(raw.strip())
+        break
+PY
+)"
+    elif command -v python >/dev/null 2>&1; then
+      line="$(python - "$compose" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+in_web = False
+for raw in open(path):
+    if re.match(r'^\s+web:\s*$', raw):
+        in_web = True
+        continue
+    if in_web and re.match(r'^\s{2}[A-Za-z].*:', raw):
+        break
+    if in_web and re.match(r'^\s+-\s+\./', raw):
+        print(raw.strip())
+        break
+PY
+)"
+    else
+      line="$(awk '/^[[:space:]]+web:[[:space:]]*$/,/^  [a-z]/ { if ($0 ~ /^[[:space:]]+-[[:space:]]+\\./) { print; exit } }' "$compose" | head -1)"
+    fi
     if [[ -n "$line" ]]; then
       # "./app:/app" -> "${WORKTREE_DIR}/app:/app"
       local host_path container_path
