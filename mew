@@ -98,7 +98,7 @@ infer_worktree_volume_mount() {
   fi
   if [[ -f "$compose" ]]; then
     local line
-    line="$(awk '/^[[:space:]]+web:[[:space:]]*$/,/^  [a-z]/ { if (/^[[:space:]]+-[[:space:]]+\\.\\//) { print; exit } }' "$compose" | head -1)"
+    line="$(awk '/^[[:space:]]+web:[[:space:]]*$/,/^  [a-z]/ { if ($0 ~ /^[[:space:]]+-[[:space:]]+\\./) { print; exit } }' "$compose" | head -1)"
     if [[ -n "$line" ]]; then
       # "./app:/app" -> "${WORKTREE_DIR}/app:/app"
       local host_path container_path
