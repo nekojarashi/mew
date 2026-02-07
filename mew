@@ -577,6 +577,9 @@ cmd_build() {
 mew_build_one() {
   local target_dir="$1"
   target_dir="$(cd "$target_dir" && pwd)"
+  if [[ "${MEW_INVOKED_FROM_BUILD:-}" == "1" && -z "${MEW_WEB_PORT_OVERRIDE:-}" ]]; then
+    unset MEW_WEB_PORT
+  fi
   mew_resolve_context "$MEW_MAIN_DIR" "$target_dir"
   local resolved_wt_project="$MEW_WT_PROJECT"
   # main の .env を読み込み（POSTGRES_* 等を利用するため）
