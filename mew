@@ -131,19 +131,19 @@ abs_path() {
   local base="$1"
   local rel="$2"
   if command -v python3 >/dev/null 2>&1; then
-    python3 - <<PY
+    BASE="$base" REL="$rel" python3 - <<'PY'
 import os
-base = ${base@Q}
-rel = ${rel@Q}
+base = os.environ.get("BASE", "")
+rel = os.environ.get("REL", "")
 print(os.path.abspath(os.path.join(base, rel)))
 PY
     return
   fi
   if command -v python >/dev/null 2>&1; then
-    python - <<PY
+    BASE="$base" REL="$rel" python - <<'PY'
 import os
-base = ${base@Q}
-rel = ${rel@Q}
+base = os.environ.get("BASE", "")
+rel = os.environ.get("REL", "")
 print(os.path.abspath(os.path.join(base, rel)))
 PY
     return
@@ -452,9 +452,13 @@ mew_build_one() {
   local target_dir="$1"
   target_dir="$(cd "$target_dir" && pwd)"
   mew_resolve_context "$MEW_MAIN_DIR" "$target_dir"
+  local resolved_wt_project="$MEW_WT_PROJECT"
   # main の .env を読み込み（POSTGRES_* 等を利用するため）
   if [[ -f "$MEW_ENV_FILE" ]]; then
     safe_load_env "$MEW_ENV_FILE"
+  fi
+  if [[ -z "${MEW_WT_PROJECT_OVERRIDE:-}" ]]; then
+    MEW_WT_PROJECT="$resolved_wt_project"
   fi
   # .env が MEW_WORKTREE_DB_NAME を上書きしている可能性があるため再検証
   validate_db_name "$MEW_WORKTREE_DB_NAME"
