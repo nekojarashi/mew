@@ -127,6 +127,30 @@ sanitize_slug() {
   echo "$s"
 }
 
+abs_path() {
+  local base="$1"
+  local rel="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<PY
+import os
+base = ${base@Q}
+rel = ${rel@Q}
+print(os.path.abspath(os.path.join(base, rel)))
+PY
+    return
+  fi
+  if command -v python >/dev/null 2>&1; then
+    python - <<PY
+import os
+base = ${base@Q}
+rel = ${rel@Q}
+print(os.path.abspath(os.path.join(base, rel)))
+PY
+    return
+  fi
+  echo "${base%/}/$rel"
+}
+
 validate_db_name() {
   local name="$1"
   if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
@@ -404,7 +428,7 @@ cmd_build() {
     local slug wt_dir wt_dir_abs
     slug="$(sanitize_slug "$br")"
     wt_dir="${prefix}${slug}"
-    wt_dir_abs="$(cd "$MEW_MAIN_DIR" && cd "$wt_dir" && pwd)"
+    wt_dir_abs="$(abs_path "$MEW_MAIN_DIR" "$wt_dir")"
     if git worktree list --porcelain 2>/dev/null | grep -Fq "worktree $wt_dir_abs"; then
       echo "[mew] already exists: $wt_dir_abs"
     else
