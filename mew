@@ -487,6 +487,7 @@ cmd_compose() {
   local database_url="postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
   local nextauth_url="${NEXTAUTH_URL:-http://localhost:${MEW_WEB_PORT}}"
   _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
+  local rc=0
   (
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" \
@@ -497,8 +498,7 @@ cmd_compose() {
            NEXTAUTH_URL="$nextauth_url" \
            MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
     docker compose -f "$_mew_compose_file" "$@"
-  )
-  local rc=$?
+  ) || rc=$?
   _mew_cleanup_compose
   return $rc
 }
@@ -684,14 +684,19 @@ mew_build_one() {
     ) || true
   fi
   # web 起動
+  local build_rc=0
   (
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
            WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
            MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
     docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
-  )
+  ) || build_rc=$?
   _mew_cleanup_compose
+  if ((build_rc != 0)); then
+    echo "mew: web の起動に失敗しました (exit $build_rc)" >&2
+    exit "$build_rc"
+  fi
   # gitdir 内にマーカーを作成（シェルフックが docker compose → mew compose に置換するための目印）
   # .git/worktrees/<name>/mew に置くためブランチは汚れない
   if [[ "$MEW_IS_MAIN" != "true" && -f "$target_dir/.git" ]]; then
@@ -825,7 +830,7 @@ cmd_restart() {
              WEB_PORT="$web_port" NEXTAUTH_URL="$nextauth_url" DATABASE_URL="$database_url" \
              MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
       docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
-    )
+    ) || true
     _mew_cleanup_compose
   done
   echo "[mew] restart done"
