@@ -34,6 +34,81 @@
 | `mew rm`                | この worktree の web 停止・DB 削除                                                                         |
 | `mew rm --all`          | 全 worktree の web 停止・DB 削除・worktree 削除（main で実行）                                             |
 | `mew restart`           | main と全 worktree の web を再起動する                                                                     |
+| `mew hook`              | シェルフック（`docker compose` → `mew compose` 自動置換）のコードを stdout に出力する                      |
+
+---
+
+## シェルフック（docker compose → mew compose 自動置換）
+
+### 課題
+
+worktree で AI コーディングツール（Cursor, Copilot, Cline 等）を使うと、AI は `docker compose` を実行しようとします。しかし worktree では `mew compose` を使う必要があります。AI ツールごとにルールを設定するのは現実的ではないため、**シェルレベルで自動置換**します。
+
+### 仕組み
+
+1. **`mew build`** が worktree を作成する際、git の内部管理領域（`.git/worktrees/<name>/mew`）にマーカーファイルを配置する
+2. **シェルフック**（`docker` 関数）が、`docker compose` 実行時にマーカーの有無を確認する
+3. マーカーがあれば `mew compose` に自動置換、なければ通常の `docker` をそのまま実行する
+
+```
+docker compose run --rm web pnpm build
+  ↓ シェルフックが .git/worktrees/<name>/mew を検出
+mew compose run --rm web pnpm build
+```
+
+### マーカーの保存場所
+
+マーカーは worktree のファイルツリーには置かず、**gitdir 内**に保存します。
+
+```
+main/.git/worktrees/feature_a/mew   ← マーカー（空ファイル）
+```
+
+- ブランチが汚れない（`git status` に表示されない）
+- `git worktree remove` で自動的に削除される
+- `mew build` で作成した worktree にのみ存在する（通常の `git worktree add` には影響しない）
+
+### インストール
+
+`install.sh` を実行すると、`mew` 本体のインストールに加えて `.zshrc` / `.bashrc` にシェルフックが自動追加されます。
+
+```bash
+# 新規インストール（フックも自動追加）
+source <(curl -sSL .../install.sh)
+```
+
+既存の環境に手動で追加する場合:
+
+```bash
+mew hook >> ~/.zshrc
+source ~/.zshrc
+```
+
+### フックの動作詳細
+
+```
+docker compose ... を実行
+  │
+  ├─ PWD から上位に .git を探す
+  │
+  ├─ .git がディレクトリ（main worktree）
+  │   → 通常の docker をそのまま実行
+  │
+  ├─ .git がファイル（worktree）
+  │   → gitdir パスを読み取り
+  │   → gitdir/mew マーカーが存在する？
+  │     ├─ YES → mew compose に置換して実行
+  │     └─ NO  → 通常の docker をそのまま実行
+  │
+  └─ .git が見つからない
+      → 通常の docker をそのまま実行
+```
+
+### フックの更新・削除
+
+フックは `# BEGIN mew hook` / `# END mew hook` で囲まれています。`install.sh` の再実行で自動更新されます。
+
+手動で削除するには、`.zshrc` / `.bashrc` から該当ブロックを削除してください。
 
 ---
 

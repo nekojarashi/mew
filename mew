@@ -363,6 +363,17 @@ mew_resolve_context() {
   validate_db_name "$MEW_WORKTREE_DB_NAME"
 }
 
+# --- compose YAML を一時ファイルに書き出す（パイプだと stdin を塞ぎ対話コマンドが使えないため）---
+_mew_compose_file=""
+_mew_write_compose() {
+  _mew_compose_file="$(mktemp "${TMPDIR:-/tmp}/mew-compose-XXXXXX.yml")"
+  mew_emit_compose_yml "$1" "$2" > "$_mew_compose_file"
+}
+_mew_cleanup_compose() {
+  [[ -n "${_mew_compose_file:-}" ]] && rm -f "$_mew_compose_file"
+  _mew_compose_file=""
+}
+
 # --- worktree 用 compose YAML を stdout に出力（ファイルは作らない）---
 mew_emit_compose_yml() {
   local main_dir="$1"
@@ -426,6 +437,7 @@ Git worktree と Docker Compose で並行開発するための汎用 CLI。
   rm        worktree の web 停止・DB 削除
   rm --all  main で全 worktree を削除
   restart   main と全 worktree の web を再起動
+  hook      シェルフック（docker → mew compose 自動置換）を stdout に出力
 
 詳細: https://github.com/nekojarashi/mew
 EOF
@@ -474,7 +486,8 @@ cmd_compose() {
   local db_port="${DB_PORT:-5433}"
   local database_url="postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
   local nextauth_url="${NEXTAUTH_URL:-http://localhost:${MEW_WEB_PORT}}"
-  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+  _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
+  (
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" \
            WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" \
@@ -483,8 +496,11 @@ cmd_compose() {
            DATABASE_URL="$database_url" \
            NEXTAUTH_URL="$nextauth_url" \
            MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-    docker compose -f - "$@"
+    docker compose -f "$_mew_compose_file" "$@"
   )
+  local rc=$?
+  _mew_cleanup_compose
+  return $rc
 }
 
 # --- サブコマンド: up（既存 worktree 1 つの web 起動）---
@@ -657,23 +673,35 @@ mew_build_one() {
   # マイグレーション（MEW_MIGRATE_CMD があれば実行）
   # 注意: MEW_MIGRATE_CMD はそのまま sh -c に渡される（設計上の仕様）。
   # 信頼できない環境変数を受け入れないこと。
+  _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
   if [[ -n "${MEW_MIGRATE_CMD:-}" ]]; then
-    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    (
       cd "$MEW_MAIN_DIR" && \
       export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
              WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
              MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-      docker compose -f - run --rm -e CI=1 "$MEW_WEB_SERVICE" sh -lc "$MEW_MIGRATE_CMD"
+      docker compose -f "$_mew_compose_file" run --rm -e CI=1 "$MEW_WEB_SERVICE" sh -lc "$MEW_MIGRATE_CMD"
     ) || true
   fi
   # web 起動
-  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+  (
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
            WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
            MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-    docker compose -f - up -d "$MEW_WEB_SERVICE"
+    docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
   )
+  _mew_cleanup_compose
+  # gitdir 内にマーカーを作成（シェルフックが docker compose → mew compose に置換するための目印）
+  # .git/worktrees/<name>/mew に置くためブランチは汚れない
+  if [[ "$MEW_IS_MAIN" != "true" && -f "$target_dir/.git" ]]; then
+    local gitdir
+    gitdir="$(sed -n 's/^gitdir: //p' "$target_dir/.git" 2>/dev/null)"
+    if [[ -n "$gitdir" ]]; then
+      [[ "$gitdir" != /* ]] && gitdir="$target_dir/$gitdir"
+      touch "$gitdir/mew"
+    fi
+  fi
   echo "[mew] OK: http://localhost:$MEW_WEB_PORT"
 }
 
@@ -692,11 +720,13 @@ cmd_rm() {
     return
   fi
   # この worktree のみ
-  mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+  _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
+  (
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-    docker compose -f - down -v
+    docker compose -f "$_mew_compose_file" down -v
   ) || true
+  _mew_cleanup_compose
   if [[ -z "${KEEP_DB:-}" ]]; then
     local db_container_id
     db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
@@ -738,11 +768,13 @@ cmd_rm_all() {
     local wt_db
     wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
     validate_db_name "$wt_db"
-    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
+    (
       cd "$MEW_MAIN_DIR" && \
       export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-      docker compose -f - down -v
+      docker compose -f "$_mew_compose_file" down -v
     ) || true
+    _mew_cleanup_compose
     local db_container_id
     db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
     if [[ -n "${db_container_id:-}" && -z "${KEEP_DB:-}" ]]; then
@@ -786,15 +818,50 @@ cmd_restart() {
     nextauth_url="http://localhost:${web_port}"
     wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
     database_url="postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_pass}@host.docker.internal:${DB_PORT:-5433}/${wt_db}"
-    mew_emit_compose_yml "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT" | (
+    _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
+    (
       cd "$MEW_MAIN_DIR" && \
       export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" \
              WEB_PORT="$web_port" NEXTAUTH_URL="$nextauth_url" DATABASE_URL="$database_url" \
              MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-      docker compose -f - up -d "$MEW_WEB_SERVICE"
+      docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
     )
+    _mew_cleanup_compose
   done
   echo "[mew] restart done"
+}
+
+# --- サブコマンド: hook（シェルフックを stdout に出力）---
+cmd_hook() {
+  cat <<'HOOK'
+# BEGIN mew hook — do not edit this block manually
+# docker compose → mew compose in mew-managed worktrees
+# See: https://github.com/koshiba-softwares/mew
+docker() {
+  if [[ "$1" == "compose" ]]; then
+    local _mew_d="$PWD"
+    while [[ "$_mew_d" != "/" ]]; do
+      if [[ -f "$_mew_d/.git" ]]; then
+        local _mew_gitdir
+        _mew_gitdir="$(sed -n 's/^gitdir: //p' "$_mew_d/.git" 2>/dev/null)"
+        if [[ -n "$_mew_gitdir" ]]; then
+          [[ "$_mew_gitdir" != /* ]] && _mew_gitdir="$_mew_d/$_mew_gitdir"
+          if [[ -f "$_mew_gitdir/mew" ]]; then
+            shift
+            command mew compose "$@"
+            return $?
+          fi
+        fi
+        break
+      fi
+      [[ -d "$_mew_d/.git" ]] && break
+      _mew_d="$(dirname "$_mew_d")"
+    done
+  fi
+  command docker "$@"
+}
+# END mew hook
+HOOK
 }
 
 # --- エントリ ---
@@ -812,6 +879,7 @@ main() {
     compose) cmd_compose "$@";;
     rm)      cmd_rm "$@";;
     restart) cmd_restart "$@";;
+    hook)    cmd_hook "$@";;
     -h|--help|help|"") cmd_help;;
     -v|--version) echo "mew $VERSION";;
     *)

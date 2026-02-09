@@ -105,3 +105,56 @@ if ! $INSTALL_DIR_WAS_IN_PATH; then
   echo "パイプ（curl | bash）で実行した場合は、新しいターミナルを開くか、.bashrc / .zshrc に以下を追加:"
   echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
 fi
+
+# --- シェルフック（docker compose → mew compose 自動置換）の登録 ---
+HOOK_MARKER_BEGIN="# BEGIN mew hook"
+HOOK_MARKER_END="# END mew hook"
+
+install_hook_to_rc() {
+  local rc_file="$1"
+  [[ ! -f "$rc_file" ]] && return 1
+  # 既にインストール済みなら更新（古いフックを除去して再追加）
+  if grep -qF "$HOOK_MARKER_BEGIN" "$rc_file" 2>/dev/null; then
+    # 一旦古いブロックを除去
+    local tmp
+    tmp="$(mktemp)"
+    awk -v begin="$HOOK_MARKER_BEGIN" -v end="$HOOK_MARKER_END" '
+      $0 ~ begin { skip=1; next }
+      $0 ~ end   { skip=0; next }
+      !skip
+    ' "$rc_file" > "$tmp"
+    mv "$tmp" "$rc_file"
+  fi
+  # フックを末尾に追加
+  echo >> "$rc_file"
+  "$TARGET" hook >> "$rc_file"
+  echo "シェルフックを追加しました: $rc_file"
+  return 0
+}
+
+# 対象の rc ファイルを判定
+RC_FILES=()
+CURRENT_SHELL="$(basename "${SHELL:-/bin/bash}")"
+case "$CURRENT_SHELL" in
+  zsh)  [[ -f "$HOME/.zshrc" ]]  && RC_FILES+=("$HOME/.zshrc");;
+  bash) [[ -f "$HOME/.bashrc" ]] && RC_FILES+=("$HOME/.bashrc");;
+esac
+# bash も zsh もない場合はフォールバック
+if ((${#RC_FILES[@]} == 0)); then
+  for f in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [[ -f "$f" ]] && RC_FILES+=("$f") && break
+  done
+fi
+
+HOOK_INSTALLED=false
+for rc in "${RC_FILES[@]}"; do
+  if install_hook_to_rc "$rc"; then
+    HOOK_INSTALLED=true
+  fi
+done
+
+if ! $HOOK_INSTALLED; then
+  echo
+  echo "シェルフックの自動追加をスキップしました（.zshrc / .bashrc が見つかりません）。"
+  echo "手動で追加するには: mew hook >> ~/.zshrc"
+fi
