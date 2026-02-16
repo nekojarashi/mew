@@ -7,23 +7,9 @@
 # パイプで実行した場合はインストールのみ（新しいターミナルか .bashrc 等で PATH を追加すること）:
 #   curl -sSL .../install.sh | bash
 
-# Source-safety: set -euo pipefail がユーザーの対話シェルに漏洩するのを防ぐ。
-# RETURN trap は bash で source 終了時（エラー含む）に発火する。
-# zsh では RETURN trap 非対応のため、末尾の明示呼び出しで対応（エラー時は漏洩する制限あり）。
-_mew_saved_options="$(set +o 2>/dev/null)" || true
-
-_mew_restore_options() {
-  eval "$_mew_saved_options" 2>/dev/null || true
-  unset _mew_saved_options 2>/dev/null || true
-  unset -f _mew_restore_options 2>/dev/null || true
-  trap - RETURN 2>/dev/null || true
-}
-
-trap _mew_restore_options RETURN 2>/dev/null || true
-
 set -euo pipefail
 
-MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/nekojarashi/mew/main/mew}"
+MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/koshiba-softwares/mew/main/mew}"
 MEW_INSTALL_DIR="${MEW_INSTALL_DIR:-}"
 MEW_CHECKSUM="${MEW_CHECKSUM:-}"
 
@@ -100,7 +86,7 @@ else
   if ! head -n 1 "$TARGET" | grep -q '^#!'; then
     rm -f "$TARGET"
     echo "mew install: ダウンロードに失敗しました（404 または不正な応答）。URL を確認してください: $MEW_RAW_URL" >&2
-    exit 1
+    return 1 2>/dev/null || exit 1
   fi
 fi
 
@@ -129,7 +115,7 @@ emit_mew_hook() {
   cat <<'HOOK'
 # BEGIN mew hook — do not edit this block manually
 # docker compose → mew compose in mew-managed worktrees
-# See: https://github.com/nekojarashi/mew
+# See: https://github.com/koshiba-softwares/mew
 docker() {
   if [[ "$1" == "compose" ]]; then
     local _mew_d="$PWD"
@@ -205,7 +191,3 @@ if ! $HOOK_INSTALLED; then
   echo "シェルフックの自動追加をスキップしました（.zshrc / .bashrc が見つかりません）。"
   echo "手動で追加するには: README の「シェルフックの仕組み」を参照してください。"
 fi
-
-# シェルオプション復元（正常終了時。bash ではエラー時も RETURN trap で復元される）
-_mew_restore_options
-
