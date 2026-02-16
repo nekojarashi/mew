@@ -124,13 +124,13 @@ flowchart TB
 
 ```bash
 # source で実行すると、このシェルに PATH が反映され、その場で mew が使える
-source <(curl -sSL https://raw.githubusercontent.com/OWNER/mew/main/install.sh)
+source <(curl -sSL https://raw.githubusercontent.com/nekojarashi/mew/main/install.sh)
 ```
 
 インストールのみ（あとで `.bashrc` / `.zshrc` に PATH を追加するか、新しいターミナルを開く）:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/OWNER/mew/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/nekojarashi/mew/main/install.sh | bash
 ```
 
 **前提**: `git` と `docker` がインストールされていること。
