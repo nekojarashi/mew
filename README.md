@@ -145,7 +145,7 @@ curl -sSL https://raw.githubusercontent.com/nekojarashi/mew/main/install.sh | ba
 **設定ファイルは使いません。**
 
 1. **推測**: `docker-compose.yml` と `git worktree list` から main のパス・DB 名プレフィックス・ボリュームマウントを推測
-2. **環境変数で上書き**: `MEW_MAIN_DIR`, `MEW_DB_NAME_PREFIX`, `MEW_ENV_FILE`, `MEW_WORKTREE_VOLUME`, `MEW_DB_SERVICE`, `MEW_WEB_SERVICE` など
+2. **環境変数で上書き**: `MEW_ENV_FILE`, `MEW_WORKTREE_VOLUME`, `MEW_DB_SERVICE`, `MEW_WEB_SERVICE` など
 3. **非対話**: `MEW_NON_INTERACTIVE=1` でプロンプトをスキップ（`build` 時はブランチ名を引数で指定）
 
 ### 想定するプロジェクト構成

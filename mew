@@ -366,7 +366,7 @@ mew_resolve_context() {
 # --- compose YAML を一時ファイルに書き出す（パイプだと stdin を塞ぎ対話コマンドが使えないため）---
 _mew_compose_file=""
 _mew_write_compose() {
-  _mew_compose_file="$(umask 077 && mktemp "${TMPDIR:-/tmp}/mew-compose-XXXXXX.yml")"
+  _mew_compose_file="$(umask 077 && mktemp "${TMPDIR:-/tmp}/mew-compose-XXXXXX")"
   mew_emit_compose_yml "$1" "$2" > "$_mew_compose_file"
 }
 _mew_cleanup_compose() {
