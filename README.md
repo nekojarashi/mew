@@ -8,14 +8,14 @@
 ## 目的
 
 - **複数ブランチの同時稼働**: 1 リポジトリで、main と複数 worktree を同時に起動し、それぞれ別 URL・別 DB で開発・検証する
-- **設定ファイル不要**: `.mew.yaml` 等は使わず、既存の `docker-compose.yml` と `git worktree list` から設定を推測する
+- **設定ファイル不要**: 設定ファイルは使わず、既存の `docker-compose.yml` と `git worktree list` から設定を推測する
 - **どのプロジェクトでも使える**: Docker Compose で web + db を持つプロジェクトであれば、そのまま mew で worktree 並行開発ができる
 
 ---
 
 ## 概要
 
-- **コマンド**: 単一の `mew` コマンドにサブコマンドで機能を提供（`mew build`, `mew up`, `mew compose` など）
+- **コマンド**: 単一の `mew` コマンドにサブコマンドで機能を提供（`mew build` など）
 - **配布**: 単一の Bash スクリプト + インストーラ（`install.sh`）。追加の設定ファイルは不要
 - **前提**: `git` と `docker`（Docker Desktop 等）がインストールされていること
 - **略称**: **M**ultiple **E**nvironment **W**orktrees
@@ -24,91 +24,12 @@
 
 ## 機能一覧
 
-| サブコマンド            | 説明                                                                                                       |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `mew`（引数なし）       | ヘルプ（サブコマンド一覧）を表示                                                                           |
-| `mew build [branch...]` | 対話型で worktree を作成し、各 worktree で web を起動する（並行開発のメイン入口）                          |
-| `mew up [path]`         | 指定した worktree（省略時はカレント）の web を起動する（DB 作成・`MEW_MIGRATE_CMD` があれば実行）          |
-| `mew env`               | 現在の worktree の DB 名・`DATABASE_URL` 等を出力する（`source` 用）                                       |
-| `mew compose [args...]` | この worktree 用の Compose プロジェクトで `docker compose` を実行する（`run` / `logs` / `exec` / `up` 等） |
-| `mew rm`                | この worktree の web 停止・DB 削除                                                                         |
-| `mew rm --all`          | 全 worktree の web 停止・DB 削除・worktree 削除（main で実行）                                             |
-| `mew restart`           | main と全 worktree の web を再起動する                                                                     |
-| `mew hook`              | シェルフック（`docker compose` → `mew compose` 自動置換）のコードを stdout に出力する                      |
-
----
-
-## シェルフック（docker compose → mew compose 自動置換）
-
-### 課題
-
-worktree で AI コーディングツール（Cursor, Copilot, Cline 等）を使うと、AI は `docker compose` を実行しようとします。しかし worktree では `mew compose` を使う必要があります。AI ツールごとにルールを設定するのは現実的ではないため、**シェルレベルで自動置換**します。
-
-### 仕組み
-
-1. **`mew build`** が worktree を作成する際、git の内部管理領域（`.git/worktrees/<name>/mew`）にマーカーファイルを配置する
-2. **シェルフック**（`docker` 関数）が、`docker compose` 実行時にマーカーの有無を確認する
-3. マーカーがあれば `mew compose` に自動置換、なければ通常の `docker` をそのまま実行する
-
-```
-docker compose run --rm web pnpm build
-  ↓ シェルフックが .git/worktrees/<name>/mew を検出
-mew compose run --rm web pnpm build
-```
-
-### マーカーの保存場所
-
-マーカーは worktree のファイルツリーには置かず、**gitdir 内**に保存します。
-
-```
-main/.git/worktrees/feature_a/mew   ← マーカー（空ファイル）
-```
-
-- ブランチが汚れない（`git status` に表示されない）
-- `git worktree remove` で自動的に削除される
-- `mew build` で作成した worktree にのみ存在する（通常の `git worktree add` には影響しない）
-
-### インストール
-
-`install.sh` を実行すると、`mew` 本体のインストールに加えて `.zshrc` / `.bashrc` にシェルフックが自動追加されます。
-
-```bash
-# 新規インストール（フックも自動追加）
-source <(curl -sSL .../install.sh)
-```
-
-既存の環境に手動で追加する場合:
-
-```bash
-mew hook >> ~/.zshrc
-source ~/.zshrc
-```
-
-### フックの動作詳細
-
-```
-docker compose ... を実行
-  │
-  ├─ PWD から上位に .git を探す
-  │
-  ├─ .git がディレクトリ（main worktree）
-  │   → 通常の docker をそのまま実行
-  │
-  ├─ .git がファイル（worktree）
-  │   → gitdir パスを読み取り
-  │   → gitdir/mew マーカーが存在する？
-  │     ├─ YES → mew compose に置換して実行
-  │     └─ NO  → 通常の docker をそのまま実行
-  │
-  └─ .git が見つからない
-      → 通常の docker をそのまま実行
-```
-
-### フックの更新・削除
-
-フックは `# BEGIN mew hook` / `# END mew hook` で囲まれています。`install.sh` の再実行で自動更新されます。
-
-手動で削除するには、`.zshrc` / `.bashrc` から該当ブロックを削除してください。
+| サブコマンド            | 説明                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------- |
+| `mew`（引数なし）       | ヘルプ（サブコマンド一覧）を表示                                                  |
+| `mew build [branch...]` | 対話型で worktree を作成し、各 worktree で web を起動する（並行開発のメイン入口） |
+| `mew rm`                | この worktree の web 停止・DB 削除                                                |
+| `mew rm --all`          | 全 worktree の web 停止・DB 削除・worktree 削除（main で実行）                    |
 
 ---
 
@@ -214,13 +135,15 @@ curl -sSL https://raw.githubusercontent.com/OWNER/mew/main/install.sh | bash
 
 **前提**: `git` と `docker` がインストールされていること。
 
+`install.sh` 実行時には、`.zshrc` / `.bashrc` にシェルフックも追加されます。worktree 内では `docker compose` のまま入力すれば、自動で mew 用の compose に置き換わります（詳細は末尾の「シェルフックの仕組み」を参照）。
+
 ---
 
 ## 使い方
 
 ### 設定の決め方
 
-**.mew.yaml などの設定ファイルは使いません。**
+**設定ファイルは使いません。**
 
 1. **推測**: `docker-compose.yml` と `git worktree list` から main のパス・DB 名プレフィックス・ボリュームマウントを推測
 2. **環境変数で上書き**: `MEW_MAIN_DIR`, `MEW_DB_NAME_PREFIX`, `MEW_ENV_FILE`, `MEW_WORKTREE_VOLUME`, `MEW_DB_SERVICE`, `MEW_WEB_SERVICE` など
@@ -237,11 +160,10 @@ curl -sSL https://raw.githubusercontent.com/OWNER/mew/main/install.sh | bash
 # main で worktree を作成して web 起動
 mew build feature-a feature-b
 
-# worktree ディレクトリで web を起動（DB 作成・migrate は MEW_MIGRATE_CMD があれば実行）
-mew up
+# 既存 worktree の web を起動したい場合は、main で mew build <branch> を再実行（既存なら web のみ起動）
 
-# worktree 側で migrate など
-mew compose run --rm web pnpm db:migrate
+# worktree 側で migrate など（docker compose と書けばシェルフックで自動置換される）
+docker compose run --rm web pnpm db:migrate
 
 # この worktree だけ片付け
 mew rm
@@ -249,6 +171,10 @@ mew rm
 # main で全 worktree を削除
 mew rm --all
 ```
+
+### worktree 側での注意（Docker まわり）
+
+worktree では **main の Docker 環境（Postgres や docker-compose の設定）を共有**しており、`docker compose` はシェルフックにより mew 用の compose に置き換わります。そのため、**`docker-compose.yml` や Dockerfile、docker まわりの設定を変更する作業は worktree では行わず、main で行う**ようにしてください。worktree 側でそれらを変更すると、main や他 worktree に影響したり、mew の推測がずれたりする可能性があります。
 
 ---
 
@@ -259,6 +185,42 @@ mew rm --all
 | `mew`        | 単一の Bash スクリプト（全ロジックをこのファイルに含む） |
 | `install.sh` | curl \| bash 用インストーラ（PATH に `mew` を配置）      |
 | `README.md`  | 本ドキュメント                                           |
+
+---
+
+## シェルフックの仕組み
+
+worktree では、`docker compose` をそのまま実行すると main の `docker-compose.yml` が参照され、main のコンテナが操作されてしまう。正しくは worktree 用の compose を扱う `mew compose` を実行する必要がある。しかし AI ツールやドキュメントは `docker compose` と書くことが多く、利用者やツールごとに書き分けるのは現実的ではない。そのため、**シェルレベルで `docker compose` を `mew compose` に透過的に置き換える**仕組みを用意している。
+
+### 構成要素
+
+1. **マーカー**: `mew build` が worktree を作成するときに、その worktree の git 内部領域（gitdir）に空ファイル `mew` を置く。これにより「この worktree は mew で作成された」と判定できる。
+2. **シェルフック**: `docker` を関数として定義し、`docker compose` 実行時だけ PWD から上位に `.git` を辿り、worktree かつ gitdir に `mew` があれば `mew compose` に置き換えて実行する。それ以外は従来どおり `docker` を呼ぶ。
+3. **マーカーの場所**: マーカーは worktree の作業ツリーには置かず、main 側の `.git/worktrees/<name>/mew`（gitdir 内）に置く。これにより `git status` に現れず、`git worktree remove` で消える。
+
+### 判定フロー
+
+```
+docker compose ... が実行される
+  │
+  ├─ PWD から上位に .git を探す
+  │
+  ├─ .git がディレクトリ（main worktree）
+  │   → 通常の docker をそのまま実行
+  │
+  ├─ .git がファイル（worktree）
+  │   → gitdir パスを読み取り
+  │   → gitdir/mew マーカーが存在する？
+  │     ├─ YES → mew compose に置換して実行
+  │     └─ NO  → 通常の docker をそのまま実行
+  │
+  └─ .git が見つからない
+      → 通常の docker をそのまま実行
+```
+
+### フックの管理
+
+フックは `install.sh` 実行時に `.zshrc` / `.bashrc` へ追加され、`# BEGIN mew hook` / `# END mew hook` で囲まれたブロックとして書かれる。手動で追加する場合は、`install.sh` 内の `emit_mew_hook` が出力するフックブロックを rc にコピーするか、`.zshrc` / `.bashrc` を作成したうえで `install.sh` を再実行する。`install.sh` を再実行すると既存のフックブロックは更新され、削除する場合は `# BEGIN mew hook` 〜 `# END mew hook` のブロックを rc から削除する。
 
 ---
 

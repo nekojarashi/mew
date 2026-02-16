@@ -384,7 +384,7 @@ mew_emit_compose_yml() {
 services:
   ${web_svc}:
     build:
-      context: .
+      context: \${MEW_BUILD_CONTEXT:-.}
       target: \${MEW_BUILD_TARGET:-base}
     ports:
       - "\${WEB_PORT:-3000}:3000"
@@ -430,46 +430,11 @@ Git worktree と Docker Compose で並行開発するための汎用 CLI。
 
 サブコマンド:
   build     対話型: worktree 作成 → 各 worktree で web 起動
-  up [path] 指定 worktree（省略時はカレント）の web を起動（DB 作成・migrate は MEW_MIGRATE_CMD があれば実行）
-  env       現在の worktree の DB 名・DATABASE_URL 等を出力（source 用）
-  path      このターミナルで mew をすぐ使うための export PATH を出力（install 直後に eval 用）
-  compose   この worktree 用の Compose で docker compose を実行
   rm        worktree の web 停止・DB 削除
   rm --all  main で全 worktree を削除
-  restart   main と全 worktree の web を再起動
-  hook      シェルフック（docker → mew compose 自動置換）を stdout に出力
 
 詳細: https://github.com/nekojarashi/mew
 EOF
-}
-
-# --- サブコマンド: path（install 直後に eval して現在のシェルで mew を有効にする）---
-cmd_path() {
-  local self="${BASH_SOURCE[0]:-$0}"
-  if [[ "$self" != /* ]]; then
-    self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
-  fi
-  local dir
-  dir="$(cd "$(dirname "$self")" && pwd)"
-  echo "export PATH=\"$dir:\$PATH\""
-}
-
-# --- サブコマンド: env ---
-cmd_env() {
-  local root
-  root="$(find_project_root "${1:-.}")"
-  mew_resolve_context "$root" "$root"
-  local db_user="${POSTGRES_USER:-app_user}"
-  local db_pass="${POSTGRES_PASSWORD:-app_pass}"
-  local db_port="${DB_PORT:-5433}"
-  echo "MEW_MAIN_DIR=$MEW_MAIN_DIR"
-  echo "MEW_WORKTREE_DB_NAME=$MEW_WORKTREE_DB_NAME"
-  echo "WORKTREE_DB_NAME=$MEW_WORKTREE_DB_NAME"
-  echo "DATABASE_URL=postgresql://${db_user}:${db_pass}@db:5432/${MEW_WORKTREE_DB_NAME}"
-  echo "DATABASE_URL_HOST=postgresql://${db_user}:${db_pass}@host.docker.internal:${db_port}/${MEW_WORKTREE_DB_NAME}"
-  echo "MEW_WT_PROJECT=$MEW_WT_PROJECT"
-  echo "MEW_WEB_PORT=$MEW_WEB_PORT"
-  echo "COMPOSE_PROJECT_NAME=$(basename "$MEW_MAIN_DIR")"
 }
 
 # --- サブコマンド: compose ---
@@ -496,23 +461,12 @@ cmd_compose() {
            WEB_PORT="$MEW_WEB_PORT" \
            DATABASE_URL="$database_url" \
            NEXTAUTH_URL="$nextauth_url" \
-           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" \
+           MEW_BUILD_CONTEXT="$MEW_MAIN_DIR" && \
     docker compose -f "$_mew_compose_file" "$@"
   ) || rc=$?
   _mew_cleanup_compose
   return $rc
-}
-
-# --- サブコマンド: up（既存 worktree 1 つの web 起動）---
-cmd_up() {
-  local root
-  root="$(find_project_root .)"
-  mew_resolve_context "$root" "${1:-$root}"
-  if [[ ! -f "$MEW_ENV_FILE" ]]; then
-    echo "mew: ENV_FILE が見つかりません: $MEW_ENV_FILE" >&2
-    exit 1
-  fi
-  mew_build_one "$MEW_TARGET_WORKTREE_DIR"
 }
 
 # --- サブコマンド: build（worktree 作成 + web 起動）---
@@ -679,7 +633,7 @@ mew_build_one() {
       cd "$MEW_MAIN_DIR" && \
       export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
              WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
-             MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+             MEW_WEB_SERVICE="$MEW_WEB_SERVICE" MEW_BUILD_CONTEXT="$MEW_MAIN_DIR" && \
       docker compose -f "$_mew_compose_file" run --rm -e CI=1 "$MEW_WEB_SERVICE" sh -lc "$MEW_MIGRATE_CMD"
     ) || true
   fi
@@ -689,7 +643,7 @@ mew_build_one() {
     cd "$MEW_MAIN_DIR" && \
     export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$target_dir" ENV_FILE="$env_file" \
            WEB_PORT="$MEW_WEB_PORT" DATABASE_URL="$database_url" NEXTAUTH_URL="$nextauth_url" \
-           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+           MEW_WEB_SERVICE="$MEW_WEB_SERVICE" MEW_BUILD_CONTEXT="$MEW_MAIN_DIR" && \
     docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
   ) || build_rc=$?
   _mew_cleanup_compose
@@ -715,20 +669,20 @@ cmd_rm() {
   local root
   root="$(find_project_root .)"
   mew_resolve_context "$root" "$root"
-  if [[ "$MEW_IS_MAIN" == "true" ]]; then
-    echo "mew rm: main worktree では実行できません。引数で worktree パスを指定するか、全削除の場合は mew rm --all を main で実行してください。" >&2
-    exit 1
-  fi
   if [[ "${1:-}" == "--all" ]]; then
     shift
     cmd_rm_all "$root"
     return
   fi
+  if [[ "$MEW_IS_MAIN" == "true" ]]; then
+    echo "mew rm: main worktree では実行できません。引数で worktree パスを指定するか、全削除の場合は mew rm --all を main で実行してください。" >&2
+    exit 1
+  fi
   # この worktree のみ
   _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
   (
     cd "$MEW_MAIN_DIR" && \
-    export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+    export COMPOSE_PROJECT_NAME="$MEW_WT_PROJECT" WORKTREE_DIR="$MEW_TARGET_WORKTREE_DIR" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" MEW_BUILD_CONTEXT="$MEW_MAIN_DIR" && \
     docker compose -f "$_mew_compose_file" down -v
   ) || true
   _mew_cleanup_compose
@@ -776,7 +730,7 @@ cmd_rm_all() {
     _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
     (
       cd "$MEW_MAIN_DIR" && \
-      export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
+      export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" MEW_WEB_SERVICE="$MEW_WEB_SERVICE" MEW_BUILD_CONTEXT="$MEW_MAIN_DIR" && \
       docker compose -f "$_mew_compose_file" down -v
     ) || true
     _mew_cleanup_compose
@@ -793,82 +747,6 @@ cmd_rm_all() {
   echo "[mew] rm --all done"
 }
 
-# --- サブコマンド: restart ---
-cmd_restart() {
-  local root
-  root="$(find_project_root .)"
-  mew_resolve_context "$root" "$root"
-  if [[ "$MEW_IS_MAIN" != "true" ]]; then
-    echo "mew restart: main worktree で実行してください。" >&2
-    exit 1
-  fi
-  local only="${ONLY:-}"
-  if [[ -z "$only" || "$only" == "main" ]]; then
-    echo "[mew] restart main"
-    (cd "$MEW_MAIN_DIR" && docker compose up -d)
-  fi
-  if [[ "$only" == "main" ]]; then
-    return 0
-  fi
-  local worktrees=()
-  while IFS= read -r p; do
-    [[ -n "$p" && "$p" != "$MEW_MAIN_DIR" ]] && worktrees+=("$p")
-  done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
-  for wt_dir in "${worktrees[@]}"; do
-    [[ ! -d "$wt_dir" ]] && continue
-    local slug wt_project web_port nextauth_url wt_db database_url
-    slug="$(sanitize_slug "$(basename "$wt_dir")")"
-    wt_project="$slug"
-    web_port="$(web_port_for_slug "$slug")"
-    nextauth_url="http://localhost:${web_port}"
-    wt_db="$(db_name_for_slug "$slug" "$MEW_DB_NAME_PREFIX")"
-    database_url="postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_pass}@host.docker.internal:${DB_PORT:-5433}/${wt_db}"
-    _mew_write_compose "$MEW_MAIN_DIR" "$MEW_WORKTREE_VOLUME_MOUNT"
-    (
-      cd "$MEW_MAIN_DIR" && \
-      export COMPOSE_PROJECT_NAME="$wt_project" WORKTREE_DIR="$wt_dir" ENV_FILE="$MEW_ENV_FILE" \
-             WEB_PORT="$web_port" NEXTAUTH_URL="$nextauth_url" DATABASE_URL="$database_url" \
-             MEW_WEB_SERVICE="$MEW_WEB_SERVICE" && \
-      docker compose -f "$_mew_compose_file" up -d "$MEW_WEB_SERVICE"
-    ) || true
-    _mew_cleanup_compose
-  done
-  echo "[mew] restart done"
-}
-
-# --- サブコマンド: hook（シェルフックを stdout に出力）---
-cmd_hook() {
-  cat <<'HOOK'
-# BEGIN mew hook — do not edit this block manually
-# docker compose → mew compose in mew-managed worktrees
-# See: https://github.com/koshiba-softwares/mew
-docker() {
-  if [[ "$1" == "compose" ]]; then
-    local _mew_d="$PWD"
-    while [[ "$_mew_d" != "/" ]]; do
-      if [[ -f "$_mew_d/.git" ]]; then
-        local _mew_gitdir
-        _mew_gitdir="$(sed -n 's/^gitdir: //p' "$_mew_d/.git" 2>/dev/null)"
-        if [[ -n "$_mew_gitdir" ]]; then
-          [[ "$_mew_gitdir" != /* ]] && _mew_gitdir="$_mew_d/$_mew_gitdir"
-          if [[ -f "$_mew_gitdir/mew" ]]; then
-            shift
-            command mew compose "$@"
-            return $?
-          fi
-        fi
-        break
-      fi
-      [[ -d "$_mew_d/.git" ]] && break
-      _mew_d="$(dirname "$_mew_d")"
-    done
-  fi
-  command docker "$@"
-}
-# END mew hook
-HOOK
-}
-
 # --- エントリ ---
 main() {
   need_cmd git
@@ -878,13 +756,8 @@ main() {
   shift 2>/dev/null || true
   case "$sub" in
     build)   cmd_build "$@";;
-    up)      cmd_up "$@";;
-    env)     cmd_env "$@";;
-    path)    cmd_path "$@";;
     compose) cmd_compose "$@";;
     rm)      cmd_rm "$@";;
-    restart) cmd_restart "$@";;
-    hook)    cmd_hook "$@";;
     -h|--help|help|"") cmd_help;;
     -v|--version) echo "mew $VERSION";;
     *)

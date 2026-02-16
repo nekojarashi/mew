@@ -110,6 +110,39 @@ fi
 HOOK_MARKER_BEGIN="# BEGIN mew hook"
 HOOK_MARKER_END="# END mew hook"
 
+# フックブロックを stdout に出力（install.sh 内に保持し、mew コマンドには含めない）
+emit_mew_hook() {
+  cat <<'HOOK'
+# BEGIN mew hook — do not edit this block manually
+# docker compose → mew compose in mew-managed worktrees
+# See: https://github.com/koshiba-softwares/mew
+docker() {
+  if [[ "$1" == "compose" ]]; then
+    local _mew_d="$PWD"
+    while [[ "$_mew_d" != "/" ]]; do
+      if [[ -f "$_mew_d/.git" ]]; then
+        local _mew_gitdir
+        _mew_gitdir="$(sed -n 's/^gitdir: //p' "$_mew_d/.git" 2>/dev/null)"
+        if [[ -n "$_mew_gitdir" ]]; then
+          [[ "$_mew_gitdir" != /* ]] && _mew_gitdir="$_mew_d/$_mew_gitdir"
+          if [[ -f "$_mew_gitdir/mew" ]]; then
+            shift
+            command mew compose "$@"
+            return $?
+          fi
+        fi
+        break
+      fi
+      [[ -d "$_mew_d/.git" ]] && break
+      _mew_d="$(dirname "$_mew_d")"
+    done
+  fi
+  command docker "$@"
+}
+# END mew hook
+HOOK
+}
+
 install_hook_to_rc() {
   local rc_file="$1"
   [[ ! -f "$rc_file" ]] && return 1
@@ -127,7 +160,7 @@ install_hook_to_rc() {
   fi
   # フックを末尾に追加
   echo >> "$rc_file"
-  "$TARGET" hook >> "$rc_file"
+  emit_mew_hook >> "$rc_file"
   echo "シェルフックを追加しました: $rc_file"
   return 0
 }
@@ -156,5 +189,5 @@ done
 if ! $HOOK_INSTALLED; then
   echo
   echo "シェルフックの自動追加をスキップしました（.zshrc / .bashrc が見つかりません）。"
-  echo "手動で追加するには: mew hook >> ~/.zshrc"
+  echo "手動で追加するには: README の「シェルフックの仕組み」を参照してください。"
 fi
