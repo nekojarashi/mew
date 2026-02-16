@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/koshiba-softwares/mew/main/mew}"
+MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/nekojarashi/mew/main/mew}"
 MEW_INSTALL_DIR="${MEW_INSTALL_DIR:-}"
 MEW_CHECKSUM="${MEW_CHECKSUM:-}"
 
@@ -88,6 +88,9 @@ else
     echo "mew install: ダウンロードに失敗しました（404 または不正な応答）。URL を確認してください: $MEW_RAW_URL" >&2
     exit 1
   fi
+  if [[ -z "$MEW_CHECKSUM" ]]; then
+    echo "mew install: 注意: MEW_CHECKSUM 未指定のため、ダウンロードの完全性検証をスキップしました。" >&2
+  fi
 fi
 
 chmod +x "$TARGET"
@@ -115,7 +118,7 @@ emit_mew_hook() {
   cat <<'HOOK'
 # BEGIN mew hook — do not edit this block manually
 # docker compose → mew compose in mew-managed worktrees
-# See: https://github.com/koshiba-softwares/mew
+# See: https://github.com/nekojarashi/mew
 docker() {
   if [[ "$1" == "compose" ]]; then
     local _mew_d="$PWD"

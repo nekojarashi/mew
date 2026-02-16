@@ -366,7 +366,7 @@ mew_resolve_context() {
 # --- compose YAML を一時ファイルに書き出す（パイプだと stdin を塞ぎ対話コマンドが使えないため）---
 _mew_compose_file=""
 _mew_write_compose() {
-  _mew_compose_file="$(mktemp "${TMPDIR:-/tmp}/mew-compose-XXXXXX.yml")"
+  _mew_compose_file="$(umask 077 && mktemp "${TMPDIR:-/tmp}/mew-compose-XXXXXX.yml")"
   mew_emit_compose_yml "$1" "$2" > "$_mew_compose_file"
 }
 _mew_cleanup_compose() {
@@ -387,7 +387,7 @@ services:
       context: \${MEW_BUILD_CONTEXT:-.}
       target: \${MEW_BUILD_TARGET:-base}
     ports:
-      - "\${WEB_PORT:-3000}:3000"
+      - "127.0.0.1:\${WEB_PORT:-3000}:3000"
     env_file:
       - \${ENV_FILE:-.env}
     environment:
@@ -605,25 +605,26 @@ mew_build_one() {
     exit 1
   fi
   # DB 作成（無ければ）
-  docker exec -i "$db_container_id" sh -lc "
-    set -e
-    DB_NAME='$MEW_WORKTREE_DB_NAME'
-    CLONE_FROM='$clone_source'
-    REFRESH_DB='$refresh_db'
-    EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$DB_NAME'\")
-    if [ \"\$EXISTS\" = '1' ] && [ \"\$REFRESH_DB\" = '1' ]; then
-      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='\$DB_NAME' AND pid <> pg_backend_pid();\"
-      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE \\\"\$DB_NAME\\\";\"
-      EXISTS='0'
-    fi
-    if [ \"\$EXISTS\" != '1' ]; then
-      psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"CREATE DATABASE \\\"\$DB_NAME\\\";\"
-      SRC_EXISTS=\$(psql -U \"\$POSTGRES_USER\" -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='\$CLONE_FROM'\")
-      if [ \"\$SRC_EXISTS\" = '1' ]; then
-        pg_dump -U \"\$POSTGRES_USER\" -d \"\$CLONE_FROM\" -Fc | pg_restore -U \"\$POSTGRES_USER\" -d \"\$DB_NAME\" --no-owner --no-privileges || true
-      fi
-    fi
-  "
+  docker exec -i \
+    -e "MEW_DB_NAME=$MEW_WORKTREE_DB_NAME" \
+    -e "MEW_CLONE_FROM=$clone_source" \
+    -e "MEW_REFRESH_DB=$refresh_db" \
+    "$db_container_id" sh -l <<'DBSCRIPT'
+set -e
+EXISTS=$(psql -U "$POSTGRES_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$MEW_DB_NAME'")
+if [ "$EXISTS" = "1" ] && [ "$MEW_REFRESH_DB" = "1" ]; then
+  psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$MEW_DB_NAME' AND pid <> pg_backend_pid();"
+  psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE \"$MEW_DB_NAME\";"
+  EXISTS="0"
+fi
+if [ "$EXISTS" != "1" ]; then
+  psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$MEW_DB_NAME\";"
+  SRC_EXISTS=$(psql -U "$POSTGRES_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$MEW_CLONE_FROM'")
+  if [ "$SRC_EXISTS" = "1" ]; then
+    pg_dump -U "$POSTGRES_USER" -d "$MEW_CLONE_FROM" -Fc | pg_restore -U "$POSTGRES_USER" -d "$MEW_DB_NAME" --no-owner --no-privileges || true
+  fi
+fi
+DBSCRIPT
   # マイグレーション（MEW_MIGRATE_CMD があれば実行）
   # 注意: MEW_MIGRATE_CMD はそのまま sh -c に渡される（設計上の仕様）。
   # 信頼できない環境変数を受け入れないこと。
@@ -690,10 +691,12 @@ cmd_rm() {
     local db_container_id
     db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
     if [[ -n "${db_container_id:-}" ]]; then
-      docker exec -i "$db_container_id" sh -lc "
-        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$MEW_WORKTREE_DB_NAME';\"
-        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE IF EXISTS \\\"$MEW_WORKTREE_DB_NAME\\\";\"
-      " || true
+      docker exec -i \
+        -e "MEW_DB_NAME=$MEW_WORKTREE_DB_NAME" \
+        "$db_container_id" sh -l <<'DBSCRIPT' || true
+psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$MEW_DB_NAME';"
+psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$MEW_DB_NAME\";"
+DBSCRIPT
     fi
   fi
   echo "[mew] rm done (worktree の削除は手動で: git worktree remove <path>)"
@@ -737,10 +740,12 @@ cmd_rm_all() {
     local db_container_id
     db_container_id="$(cd "$MEW_MAIN_DIR" && docker compose ps -q "$MEW_DB_SERVICE")"
     if [[ -n "${db_container_id:-}" && -z "${KEEP_DB:-}" ]]; then
-      docker exec -i "$db_container_id" sh -lc "
-        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$wt_db';\"
-        psql -U \"\$POSTGRES_USER\" -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE IF EXISTS \\\"$wt_db\\\";\"
-      " || true
+      docker exec -i \
+        -e "MEW_DB_NAME=$wt_db" \
+        "$db_container_id" sh -l <<'DBSCRIPT' || true
+psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$MEW_DB_NAME';"
+psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$MEW_DB_NAME\";"
+DBSCRIPT
     fi
     git worktree remove --force "$wt_dir" 2>/dev/null || true
   done
