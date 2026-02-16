@@ -7,6 +7,8 @@
 # パイプで実行した場合はインストールのみ（新しいターミナルか .bashrc 等で PATH を追加すること）:
 #   curl -sSL .../install.sh | bash
 
+# source 時に set -euo がユーザーの対話シェルに漏れるのを防ぐ
+_mew_saved_options="$(set +o 2>/dev/null)" || true
 set -euo pipefail
 
 MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/nekojarashi/mew/main/mew}"
@@ -194,3 +196,7 @@ if ! $HOOK_INSTALLED; then
   echo "シェルフックの自動追加をスキップしました（.zshrc / .bashrc が見つかりません）。"
   echo "手動で追加するには: README の「シェルフックの仕組み」を参照してください。"
 fi
+
+# source 時にシェルオプションを元に戻す（set -euo pipefail の漏洩防止）
+eval "$_mew_saved_options" 2>/dev/null || true
+unset _mew_saved_options 2>/dev/null || true

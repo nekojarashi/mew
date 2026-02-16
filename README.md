@@ -120,14 +120,13 @@ flowchart TB
 
 ## インストール
 
-**このターミナルでインストールしてすぐ使う（シェルを再起動しない）:**
+**このターミナルでインストールしてすぐ使う**（source で実行すると、このシェルに PATH が反映され、その場で mew が使える）:
 
 ```bash
-# source で実行すると、このシェルに PATH が反映され、その場で mew が使える
 source <(curl -sSL https://raw.githubusercontent.com/nekojarashi/mew/main/install.sh)
 ```
 
-インストールのみ（あとで `.bashrc` / `.zshrc` に PATH を追加するか、新しいターミナルを開く）:
+**インストールのみ**（あとで `.bashrc` / `.zshrc` に PATH を追加するか、新しいターミナルを開く）:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/nekojarashi/mew/main/install.sh | bash
