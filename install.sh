@@ -7,8 +7,20 @@
 # パイプで実行した場合はインストールのみ（新しいターミナルか .bashrc 等で PATH を追加すること）:
 #   curl -sSL .../install.sh | bash
 
-# source 時に set -euo がユーザーの対話シェルに漏れるのを防ぐ
+# Source-safety: set -euo pipefail がユーザーの対話シェルに漏洩するのを防ぐ。
+# RETURN trap は bash で source 終了時（エラー含む）に発火する。
+# zsh では RETURN trap 非対応のため、末尾の明示呼び出しで対応（エラー時は漏洩する制限あり）。
 _mew_saved_options="$(set +o 2>/dev/null)" || true
+
+_mew_restore_options() {
+  eval "$_mew_saved_options" 2>/dev/null || true
+  unset _mew_saved_options 2>/dev/null || true
+  unset -f _mew_restore_options 2>/dev/null || true
+  trap - RETURN 2>/dev/null || true
+}
+
+trap _mew_restore_options RETURN 2>/dev/null || true
+
 set -euo pipefail
 
 MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/nekojarashi/mew/main/mew}"
@@ -89,9 +101,6 @@ else
     rm -f "$TARGET"
     echo "mew install: ダウンロードに失敗しました（404 または不正な応答）。URL を確認してください: $MEW_RAW_URL" >&2
     exit 1
-  fi
-  if [[ -z "$MEW_CHECKSUM" ]]; then
-    echo "mew install: 注意: MEW_CHECKSUM 未指定のため、ダウンロードの完全性検証をスキップしました。" >&2
   fi
 fi
 
@@ -197,6 +206,6 @@ if ! $HOOK_INSTALLED; then
   echo "手動で追加するには: README の「シェルフックの仕組み」を参照してください。"
 fi
 
-# source 時にシェルオプションを元に戻す（set -euo pipefail の漏洩防止）
-eval "$_mew_saved_options" 2>/dev/null || true
-unset _mew_saved_options 2>/dev/null || true
+# シェルオプション復元（正常終了時。bash ではエラー時も RETURN trap で復元される）
+_mew_restore_options
+
