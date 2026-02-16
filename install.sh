@@ -7,9 +7,23 @@
 # パイプで実行した場合はインストールのみ（新しいターミナルか .bashrc 等で PATH を追加すること）:
 #   curl -sSL .../install.sh | bash
 
+# Source-safety: set -euo pipefail がユーザーの対話シェルに漏洩するのを防ぐ。
+# RETURN trap は bash で source 終了時（エラー含む）に発火する。
+# zsh では RETURN trap 非対応のため、末尾の明示呼び出しで対応（エラー時は漏洩する制限あり）。
+_mew_saved_options="$(set +o 2>/dev/null)" || true
+
+_mew_restore_options() {
+  eval "$_mew_saved_options" 2>/dev/null || true
+  unset _mew_saved_options 2>/dev/null || true
+  unset -f _mew_restore_options 2>/dev/null || true
+  trap - RETURN 2>/dev/null || true
+}
+
+trap _mew_restore_options RETURN 2>/dev/null || true
+
 set -euo pipefail
 
-MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/koshiba-softwares/mew/main/mew}"
+MEW_RAW_URL="${MEW_RAW_URL:-https://raw.githubusercontent.com/nekojarashi/mew/main/mew}"
 MEW_INSTALL_DIR="${MEW_INSTALL_DIR:-}"
 MEW_CHECKSUM="${MEW_CHECKSUM:-}"
 
@@ -60,7 +74,7 @@ else
     wget -q --https-only --max-redirect=3 -O "$TARGET" "$MEW_RAW_URL"
   else
     echo "mew install: curl または wget が必要です。" >&2
-    exit 1
+    return 1 2>/dev/null || exit 1
   fi
   # チェックサム検証（MEW_CHECKSUM が指定されている場合）
   if [[ -n "$MEW_CHECKSUM" ]]; then
@@ -77,7 +91,7 @@ else
       echo "mew install: チェックサム不一致。ダウンロードを中断しました。" >&2
       echo "  期待値: $MEW_CHECKSUM" >&2
       echo "  実際値: $ACTUAL_CHECKSUM" >&2
-      exit 1
+      return 1 2>/dev/null || exit 1
     else
       echo "チェックサム検証: OK"
     fi
@@ -115,7 +129,7 @@ emit_mew_hook() {
   cat <<'HOOK'
 # BEGIN mew hook — do not edit this block manually
 # docker compose → mew compose in mew-managed worktrees
-# See: https://github.com/koshiba-softwares/mew
+# See: https://github.com/nekojarashi/mew
 docker() {
   if [[ "$1" == "compose" ]]; then
     local _mew_d="$PWD"
@@ -191,3 +205,6 @@ if ! $HOOK_INSTALLED; then
   echo "シェルフックの自動追加をスキップしました（.zshrc / .bashrc が見つかりません）。"
   echo "手動で追加するには: README の「シェルフックの仕組み」を参照してください。"
 fi
+
+# シェルオプション復元（正常終了時。bash ではエラー時も RETURN trap で復元される）
+_mew_restore_options
